@@ -1,6 +1,5 @@
 use anyhow::Result;
-use autogen_rust::exec_python::run_python_func_react;
-use autogen_rust::webscraper_hook::*;
+// use autogen_rust::webscraper_hook::*;
 use autogen_rust::{immutable_agent::*, task_ledger};
 use tokio;
 
@@ -40,7 +39,7 @@ async fn main() -> Result<()> {
 
     let (mut task_ledger, solution) = user_proxy
         // .planning("tell me a joke")
-        .planning("Today is 2024-03-18. Write code to find the stock price performance of Nvidia in the past month")
+        .planning("Today is 2024-03-18. imaging stock price performance of Nvidia in the past month")
         .await;
 
     if task_ledger.task_list.is_empty() && solution.is_some() {

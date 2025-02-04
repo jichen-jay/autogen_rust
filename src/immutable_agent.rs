@@ -1,86 +1,15 @@
-use crate::exec_python::*;
 use crate::llama_structs::*;
 use crate::llm_utils::*;
 use crate::task_ledger::*;
 use crate::utils::*;
-use crate::webscraper_hook::{get_webpage_text, search_with_bing};
-use crate::{
-    CODE_PYTHON_SYSTEM_MESSAGE, DEEPSEEK_CONFIG, IS_TERMINATION_SYSTEM_PROMPT,
-    ITERATE_CODING_FAIL_TEMPLATE, ITERATE_CODING_INCORRECT_TEMPLATE, ITERATE_CODING_START_TEMPLATE,
-    ITERATE_NEXT_STEP_TEMPLATE, TOGETHER_CONFIG,
-};
-use anyhow::{Context, Result};
+// use crate::webscraper_hook::{get_webpage_text, search_with_bing};
+use crate::{IS_TERMINATION_SYSTEM_PROMPT, ITERATE_NEXT_STEP_TEMPLATE, TOGETHER_CONFIG};
+use anyhow::Result;
 use async_openai::types::Role;
-use chrono::Utc;
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
 use tokio::io::{self, AsyncBufReadExt};
 use tokio::time::{timeout, Duration};
-
-pub static GROUNDING_CHECK_TEMPLATE: Lazy<String> = Lazy::new(|| {
-    let today = Utc::now().format("%Y-%m-%dT").to_string();
-    format!(
-        r#"
-<|im_start|>system You are an AI assistant. Your task is to determine whether a question requires grounding in real-world date, time, location, or physics.
-
-When given a task, please follow these steps to think it through and then act:
-
-Identify Temporal Relevance: Determine if the question requires current or time-sensitive information. Note that today's date is {}.
-Check for Location Specificity: Identify if the question is location-specific.
-Determine Real-time Data Dependency: Assess if the answer depends on real-time data or specific locations.
-Suggest Grounding Information: If grounding is needed, suggest using today's date to cross-validate the reply. Otherwise, suggest reliable sources to obtain the necessary grounding data.
-
-Remember that you are a dispatcher; you DO NOT work on tasks yourself. Your role is to direct the process.
-
-In your reply, list out your think-aloud steps clearly:
-
-Example 1:
-
-When tasked with "What is the weather like in New York?" reshape your answer as follows:
-
-{{
-    \"my_thought_process\": [
-        \"my_goal: goal is to identify whether grounding is needed for this task\",
-        \"Determine if the question requires current or time-sensitive information: YES\",
-        \"Provide assistance to agent for this task grounding information: today's date is xxxx-xx-xx\",
-        \"Echo original input verbatim in key_points section\"
-    ],
-    \"key_points\": [\"today's date is xxxx-xx-xx, What is the weather like in New York\"]
-}}
-
-Example 2:
-
-When tasked with \"Who killed John Lennon?\" reshape your answer as follows:
-
-{{
-    \"my_thought_process\": [
-        \"my_goal: goal is to identify whether grounding is needed for this task\",
-        \"Determine if the question requires current or time-sensitive information: NO\",
-        \"Echo original input verbatim in key_points section\"
-    ],
-    \"key_points\": [\"Who killed John Lennon?\"]
-}}
-
-Use this format for your response:
-
-```json
-{{
-    \"my_thought_process\": [
-        \"my_goal: goal is to identify whether grounding is needed for this task\",
-        \"thought_process_one: my judgement at this step\",
-        \"...\",
-        \"thought_process_N: my judgement at this step\"
-    ],
-    \"grounded_or_not\": \"YES\" or \"NO\",
-    \"key_points\": [\"point1\", \"point2\", ...]
-}}
-"#,
-        today
-    )
-});
 
 const NEXT_STEP_PLANNING: &'static str = r#"
 <|im_start|>system You are a helpful AI assistant. Your task is to decompose complex tasks into clear, manageable sub-tasks and provide high-level guidance.
@@ -268,30 +197,7 @@ impl ImmutableAgent {
                         }
                         None => String::from("failed in use_intrinsic_knowledge"),
                     },
-                    "search_with_bing" => match args.get("query") {
-                        Some(q) => {
-                            println!("entered bing arm: {:?}", q.clone());
 
-                            match search_with_bing(&q).await {
-                                Ok(ve) => {
-                                    println!("bing result: {:?}", ve.clone());
-
-                                    let url = &ve[0].0;
-                                    let res = get_webpage_text(url.to_string()).await?;
-                                    res.chars().take(6_000).collect::<String>()
-                                }
-                                Err(_) => String::from("search failed to get useful data"),
-                            }
-                        }
-                        None => String::from("failed in search_with_bing"),
-                    },
-                    "code_with_python" => match args.get("key_points") {
-                        Some(k) => {
-                            let _ = self.code_with_python(&k).await;
-                            "code_with_python working".to_string()
-                        }
-                        None => String::from("failed in code_with_python"),
-                    },
                     _ => {
                         panic!();
                     }
@@ -416,110 +322,6 @@ impl ImmutableAgent {
 
         (terminate_or_not, key_points.join(","))
     }
-
-    pub async fn code_with_python(&self, input: &str) -> anyhow::Result<()> {
-        let formatter = ITERATE_CODING_START_TEMPLATE.lock().unwrap();
-        let mut user_prompt = formatter(&[input]);
-
-        for n in 1..9 {
-            println!("Iteration: {}", n);
-            match chat_inner_async_wrapper(
-                &DEEPSEEK_CONFIG,
-                &CODE_PYTHON_SYSTEM_MESSAGE,
-                &user_prompt,
-                1000u16,
-            )
-            .await?
-            .content
-            {
-                Content::Text(_out) => {
-                    // let head: String = _out.chars().take(200).collect::<String>();
-                    println!("Raw generation {n}:\n {}\n\n", _out.clone());
-                    let (this_round_good, code, exec_result) = run_python_wrapper(&_out).await;
-                    println!("code:\n{}\n\n", code.clone());
-                    println!("Run result {n}: {}\n", exec_result.clone());
-
-                    if this_round_good {
-                        let (terminate_or_not, key_points) =
-                            self._is_termination(&exec_result, &user_prompt).await;
-                        println!("Termination Check: {}\n", terminate_or_not);
-                        if terminate_or_not {
-                            println!("key_points: {:?}\n", key_points);
-
-                            get_user_feedback().await;
-                        }
-                    }
-
-                    let formatter = if this_round_good {
-                        ITERATE_CODING_INCORRECT_TEMPLATE.lock().unwrap()
-                    } else {
-                        ITERATE_CODING_FAIL_TEMPLATE.lock().unwrap()
-                    };
-
-                    user_prompt = formatter(&[&code, &exec_result]);
-                }
-                _ => unreachable!(),
-            }
-        }
-        Ok(())
-    }
-}
-
-/* pub async fn compress_chat_history(message_history: &Vec<Message>) -> Vec<Message> {
-    let message_history = message_history.clone();
-    let (system_messages, messages) = message_history.split_at(2);
-    let mut system_messages = system_messages.to_vec();
-
-    let chat_history_text = messages
-        .into_iter()
-        .map(|m| m.content_to_string())
-        .collect::<Vec<String>>()
-        .join("\n");
-
-    let messages = vec![
-        Message {
-            role: Role::System,
-            name: None,
-            content: Content::Text(NEXT_STEP_BY_TOOLCALL.to_string()),
-        },
-        Message {
-            role: Role::User,
-            name: None,
-            content: Content::Text(chat_history_text),
-        },
-    ];
-
-    let max_token = 1000u16;
-    let output: LlamaResponseMessage = chat_inner_async_wrapper(messages.clone(), max_token)
-        .await
-        .expect("Failed to generate reply");
-
-    match output.content {
-        Content::Text(compressed) => {
-            let message = Message {
-                role: Role::User,
-                name: None,
-                content: Content::Text(compressed),
-            };
-
-            system_messages.push(message);
-        }
-        _ => unreachable!(),
-    }
-
-    system_messages
-} */
-
-pub async fn save_py_to_disk(path: &str, code: &str) -> Result<()> {
-    let mut file = File::create(path)
-        .await
-        .context("Failed to create or open file")?;
-
-    file.write_all(code.as_bytes())
-        .await
-        .context("Failed to write code to file")?;
-
-    Ok(())
 }
 
 pub async fn get_user_feedback() -> Result<String> {
