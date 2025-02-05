@@ -8,8 +8,12 @@ use anyhow::Result;
 use async_openai::types::Role;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::error::Error;
+use std::sync::{Arc, RwLock};
 use tokio::io::{self, AsyncBufReadExt};
 use tokio::time::{timeout, Duration};
+use uuid::Uuid;
 
 const NEXT_STEP_PLANNING: &'static str = r#"
 <|im_start|>system You are a helpful AI assistant. Your task is to decompose complex tasks into clear, manageable sub-tasks and provide high-level guidance.
@@ -127,39 +131,42 @@ impl Message {
     }
 }
 
-pub struct ImmutableAgent {
-    pub name: String,
+pub type AgentId = Uuid;
+pub type Subscription = HashMap<AgentId, Vec<TopicId>>;
+pub type TopicId = String;
+
+pub struct LlmAgent {
+    pub agent_id: AgentId,
     pub system_prompt: String,
     pub llm_config: Option<Value>,
     pub tools_map_meta: String,
     pub description: String,
+    subscriptions: Arc<RwLock<Subscription>>,
 }
 
-impl ImmutableAgent {
-    pub fn simple(name: &str, system_prompt: &str) -> Self {
-        ImmutableAgent {
-            name: name.to_string(),
+impl LlmAgent {
+    pub fn simple(system_prompt: &str) -> Self {
+        LlmAgent {
+            agent_id: Uuid::new_v4(),
             system_prompt: system_prompt.to_string(),
             llm_config: None,
             tools_map_meta: String::from(""),
             description: String::from(""),
+            subscriptions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    pub fn new(
-        name: &str,
-        system_prompt: &str,
-        llm_config: Option<Value>,
-        tools_map_meta: &str,
-        description: &str,
-    ) -> Self {
-        ImmutableAgent {
-            name: name.to_string(),
-            system_prompt: system_prompt.to_string(),
-            llm_config,
-            tools_map_meta: tools_map_meta.to_string(),
-            description: description.to_string(),
-        }
+    pub fn add_subscription(&self, topic_id: TopicId) -> Result<(), Box<dyn Error>> {
+        let mut subs = self.subscriptions.write().unwrap();
+        subs.entry(self.agent_id)
+            .or_insert_with(Vec::new)
+            .push(topic_id);
+        Ok(())
+    }
+
+    pub fn get_subscriptions(&self) -> Option<Vec<TopicId>> {
+        let subs = self.subscriptions.read().unwrap();
+        subs.get(&self.agent_id).cloned()
     }
 
     pub async fn next_step_by_toolcall(

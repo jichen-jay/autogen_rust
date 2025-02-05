@@ -7,7 +7,7 @@ use tokio;
 async fn main() -> Result<()> {
     dotenv::dotenv().ok();
 
-    let user_proxy = ImmutableAgent::simple("user_proxy", "");
+    let user_proxy = LlmAgent::simple("");
 
     // match run_python_func_react("/Users/jichen/Projects/autogen_rust/src/test.py").await {
     //     Ok(res) => println!("solution: {:?}\n\n ", res),
@@ -39,7 +39,9 @@ async fn main() -> Result<()> {
 
     let (mut task_ledger, solution) = user_proxy
         // .planning("tell me a joke")
-        .planning("Today is 2024-03-18. imaging stock price performance of Nvidia in the past month")
+        .planning(
+            "Today is 2024-03-18. imaging stock price performance of Nvidia in the past month",
+        )
         .await;
 
     if task_ledger.task_list.is_empty() && solution.is_some() {

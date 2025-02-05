@@ -1,3 +1,4 @@
+pub mod actor;
 pub mod immutable_agent;
 pub mod llama_structs;
 pub mod llm_utils;
@@ -582,23 +583,6 @@ Think alound and put your thoughts down in the following template: {{
 })));
 }
 
-/* pub async fn entry(inp: &str) {
-    use tokio::select;
-
-    let mut agent = ImmutableAgent::coding_agent(None, "");
-    loop {
-        agent = select! {
-            agent = group.next_agent() => {
-                agent
-            },
-            _ = signal::ctrl_c() => {
-                std::process::exit(0);
-            },
-        };
-
-        agent.();
-    }
-} */
 
 const _DRAFT_TOOLCALL_PROMPT: &'static str = r#"
 I'm creating a large language model prompt that use these strategies:
