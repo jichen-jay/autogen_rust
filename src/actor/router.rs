@@ -1,7 +1,10 @@
-use crate::actor::{AgentMessage, RouterActor, RouterMessage};
+use crate::actor::{
+    AgentMessage, RouterActor, RouterMessage, AgentState, 
+    ActorContext, Message, AgentId, TopicId
+};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
-use uuid::Uuid;
+use std::time::SystemTime;
 
 impl Actor for RouterActor {
     type Msg = RouterMessage;
@@ -15,35 +18,76 @@ impl Actor for RouterActor {
     ) -> Result<Self::State, ActorProcessingErr> {
         Ok(RouterActor {
             agents: HashMap::new(),
-            subscriptions: HashMap::new(),
-            receiver: Uuid::new_v4(),
-            sender: Uuid::new_v4(),
+            topic_subscriptions: HashMap::new(),
+            agent_subscriptions: HashMap::new(),
+            agent_states: HashMap::new(),
         })
     }
-    //need to find a way to distrubute data between Msg and State
-    //Msg is supposed to be the payload of agent's work
-    // State is supposed to be meta data of the agent's work
-    // my challenge is that I don't want to make agent struct mutable,
-    //so I need to distrute some changeable data to State
-    //for LLM agent which I'm dealing with, Msg is the data that agent ingest and emits
-    //LLM agent changes its comms state by subscribing to topics, unsubscribe to topics
-    //agent also has state of ready, pending-shutdown,
+
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            RouterMessage::AgentSubscribe(agent_id, topic_id) => {
-                state.agents.insert(id, actor_ref);
+            RouterMessage::RegisterAgent(actor_ref) => {
+                let agent_id = uuid::Uuid::new_v4();
+                state.agents.insert(agent_id, actor_ref.clone());
+                state.agent_states.insert(agent_id, AgentState::Ready);
+                state.agent_subscriptions.insert(agent_id, Vec::new());
             }
-            RouterMessage::RegisterAgent(id, actor_ref) => {
-                state.agents.insert(id, actor_ref);
+            
+            RouterMessage::RouteMessage(msg) => {
+                if let Some(subscribed_agents) = state.topic_subscriptions.get(&msg.topic) {
+                    for agent_id in subscribed_agents {
+                        if let Some(agent_ref) = state.agents.get(agent_id) {
+                            if let Some(AgentState::Ready) = state.agent_states.get(agent_id) {
+                                agent_ref.send_message(AgentMessage::Process(msg.clone()))?;
+                            }
+                        }
+                    }
+                }
             }
-            RouterMessage::RouteMessage(id, msg) => {
-                if let Some(agent_ref) = state.subscriptions.get(&id) {
-                    agent_ref.send_message(AgentMessage(msg))?;
+            
+            RouterMessage::AgentSubscribe(topic_id) => {
+                let context = ActorContext {
+                    sender: state.agents.keys().next().cloned().unwrap_or_default(),
+                    timestamp: SystemTime::now(),
+                };
+                
+                state.topic_subscriptions
+                    .entry(topic_id.clone())
+                    .or_insert_with(Vec::new)
+                    .push(context.sender);
+                
+                if let Some(agent_topics) = state.agent_subscriptions.get_mut(&context.sender) {
+                    agent_topics.push(topic_id);
+                }
+            }
+            
+            RouterMessage::AgentUnsubscribe(topic_id) => {
+                let context = ActorContext {
+                    sender: state.agents.keys().next().cloned().unwrap_or_default(),
+                    timestamp: SystemTime::now(),
+                };
+                
+                if let Some(subscribed_agents) = state.topic_subscriptions.get_mut(&topic_id) {
+                    subscribed_agents.retain(|id| *id != context.sender);
+                }
+                
+                if let Some(agent_topics) = state.agent_subscriptions.get_mut(&context.sender) {
+                    agent_topics.retain(|t| t != &topic_id);
+                }
+            }
+            
+            RouterMessage::InternalBroadcast(topic_id, msg) => {
+                if let Some(subscribed_agents) = state.topic_subscriptions.get(&topic_id) {
+                    for agent_id in subscribed_agents {
+                        if let Some(agent_ref) = state.agents.get(agent_id) {
+                            agent_ref.send_message(AgentMessage::Process(msg.clone()))?;
+                        }
+                    }
                 }
             }
         }

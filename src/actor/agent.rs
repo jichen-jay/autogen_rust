@@ -1,6 +1,7 @@
-use crate::actor::{AgentActor, AgentMessage, RouterMessage};
+use crate::actor::{AgentActor, AgentMessage, RouterMessage, AgentState, ActorContext, Message};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use uuid::Uuid;
+use std::time::SystemTime;
 
 impl Actor for AgentActor {
     type Msg = AgentMessage;
@@ -13,30 +14,50 @@ impl Actor for AgentActor {
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let (id, router) = args;
-        router.send_message(RouterMessage::RegisterAgent(id, myself.clone()))?;
+        let context = ActorContext {
+            sender: id,
+            timestamp: SystemTime::now(),
+        };
+        
+        router.send_message(RouterMessage::RegisterAgent(myself.clone()))?;
 
         Ok(AgentActor {
-            agent_id: Uuid::new_v4(),
+            agent_id: id,
             router: router.clone(),
             subscribed_topics: Vec::new(),
+            state: AgentState::Ready,
         })
     }
 
-    //being the media to hold comms data, Msg, State shares responsibilities
-    //want to find a reasonable task split between them
-    //Msg is supposed to be the main vehicle of agent's raw input output
-    //State is supposed to show the condition the Actor is in, want it to hold the subscription
-    //status of agents, the agent's status - ready to work, pending-shutdown, propose reasonable ways
-    //to distribute the job
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        state
-            .router
-            .send_message(RouterMessage::RouteMessage(state.id, message.0))?;
+        let context = ActorContext {
+            sender: state.agent_id,
+            timestamp: SystemTime::now(),
+        };
+
+        match message {
+            AgentMessage::Process(content) => {
+                state.state = AgentState::Processing;
+                state.router.send_message(RouterMessage::RouteMessage(content))?;
+                state.state = AgentState::Ready;
+            },
+            AgentMessage::UpdateState(new_state) => {
+                state.state = new_state;
+            },
+            AgentMessage::Subscribe(topic) => {
+                state.subscribed_topics.push(topic.clone());
+                state.router.send_message(RouterMessage::AgentSubscribe(topic))?;
+            },
+            AgentMessage::Unsubscribe(topic) => {
+                state.subscribed_topics.retain(|t| t != &topic);
+                state.router.send_message(RouterMessage::AgentUnsubscribe(topic))?;
+            }
+        }
         Ok(())
     }
 }
