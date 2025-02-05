@@ -1,3 +1,5 @@
+#![allow(warnings, deprecated)]
+
 use anyhow::Result;
 // use autogen_rust::webscraper_hook::*;
 use autogen_rust::{immutable_agent::*, task_ledger};

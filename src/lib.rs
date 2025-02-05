@@ -1,3 +1,5 @@
+#![allow(warnings, deprecated)]
+
 pub mod actor;
 pub mod immutable_agent;
 pub mod llama_structs;
@@ -582,7 +584,6 @@ Think alound and put your thoughts down in the following template: {{
     )
 })));
 }
-
 
 const _DRAFT_TOOLCALL_PROMPT: &'static str = r#"
 I'm creating a large language model prompt that use these strategies:

@@ -11,7 +11,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::{Arc, RwLock};
-use tokio::io::{self, AsyncBufReadExt};
+use tokio::io::{stdin, AsyncBufReadExt, BufReader};
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
@@ -335,7 +335,8 @@ pub async fn get_user_feedback() -> Result<String> {
     // print!("User input: ");
 
     let mut input = String::new();
-    let mut reader = io::BufReader::new(io::stdin());
+
+    let mut reader = BufReader::new(stdin());
 
     match timeout(Duration::from_secs(10), async {
         reader

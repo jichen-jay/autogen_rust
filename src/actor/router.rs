@@ -1,13 +1,13 @@
 use crate::actor::{
-    AgentMessage, RouterActor, RouterMessage, AgentState, 
-    ActorContext, Message, AgentId, TopicId
+    ActorContext, AgentId, AgentMessage, AgentState, MessageEnvelope, RouterActor, RouterMessage,
+    TopicId,
 };
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
 use std::time::SystemTime;
 
 impl Actor for RouterActor {
-    type Msg = RouterMessage;
+    type Msg = MessageEnvelope<RouterMessage>;
     type State = RouterActor;
     type Arguments = ();
 
@@ -21,76 +21,90 @@ impl Actor for RouterActor {
             topic_subscriptions: HashMap::new(),
             agent_subscriptions: HashMap::new(),
             agent_states: HashMap::new(),
+            context: ActorContext::new(),
         })
     }
 
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
-        message: Self::Msg,
+        envelope: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match message {
+        state.context.timestamp = SystemTime::now();
+        let sender_id = envelope.context.sender;
+
+        match envelope.payload {
             RouterMessage::RegisterAgent(actor_ref) => {
-                let agent_id = uuid::Uuid::new_v4();
-                state.agents.insert(agent_id, actor_ref.clone());
-                state.agent_states.insert(agent_id, AgentState::Ready);
-                state.agent_subscriptions.insert(agent_id, Vec::new());
+                if let Some(agent_id) = sender_id {
+                    state.agents.insert(agent_id, actor_ref.clone());
+                    state.agent_states.insert(agent_id, AgentState::Ready);
+                    state.agent_subscriptions.insert(agent_id, Vec::new());
+                }
             }
-            
+
             RouterMessage::RouteMessage(msg) => {
-                if let Some(subscribed_agents) = state.topic_subscriptions.get(&msg.topic) {
-                    for agent_id in subscribed_agents {
-                        if let Some(agent_ref) = state.agents.get(agent_id) {
-                            if let Some(AgentState::Ready) = state.agent_states.get(agent_id) {
-                                agent_ref.send_message(AgentMessage::Process(msg.clone()))?;
+                if let Some(topic_id) = envelope.context.topic_id {
+                    if let Some(subscribed_agents) = state.topic_subscriptions.get(&topic_id) {
+                        for agent_id in subscribed_agents {
+                            if let Some(agent_ref) = state.agents.get(agent_id) {
+                                if let Some(AgentState::Ready) = state.agent_states.get(agent_id) {
+                                    let context = ActorContext::new()
+                                        .with_sender(*agent_id)
+                                        .with_topic(topic_id.clone());
+
+                                    let agent_msg = MessageEnvelope::new(
+                                        context,
+                                        AgentMessage::Process(msg.clone()),
+                                    );
+                                    agent_ref.send_message(agent_msg)?;
+                                }
                             }
                         }
                     }
                 }
             }
-            
-            RouterMessage::AgentSubscribe(topic_id) => {
-                let context = ActorContext {
-                    sender: state.agents.keys().next().cloned().unwrap_or_default(),
-                    timestamp: SystemTime::now(),
-                };
-                
-                state.topic_subscriptions
-                    .entry(topic_id.clone())
-                    .or_insert_with(Vec::new)
-                    .push(context.sender);
-                
-                if let Some(agent_topics) = state.agent_subscriptions.get_mut(&context.sender) {
-                    agent_topics.push(topic_id);
-                }
-            }
-            
-            RouterMessage::AgentUnsubscribe(topic_id) => {
-                let context = ActorContext {
-                    sender: state.agents.keys().next().cloned().unwrap_or_default(),
-                    timestamp: SystemTime::now(),
-                };
-                
-                if let Some(subscribed_agents) = state.topic_subscriptions.get_mut(&topic_id) {
-                    subscribed_agents.retain(|id| *id != context.sender);
-                }
-                
-                if let Some(agent_topics) = state.agent_subscriptions.get_mut(&context.sender) {
-                    agent_topics.retain(|t| t != &topic_id);
-                }
-            }
-            
+
             RouterMessage::InternalBroadcast(topic_id, msg) => {
                 if let Some(subscribed_agents) = state.topic_subscriptions.get(&topic_id) {
                     for agent_id in subscribed_agents {
                         if let Some(agent_ref) = state.agents.get(agent_id) {
-                            agent_ref.send_message(AgentMessage::Process(msg.clone()))?;
+                            let context = ActorContext::new()
+                                .with_sender(*agent_id)
+                                .with_topic(topic_id.clone());
+
+                            let agent_msg =
+                                MessageEnvelope::new(context, AgentMessage::Process(msg.clone()));
+                            agent_ref.send_message(agent_msg)?;
                         }
                     }
                 }
             }
         }
+
         Ok(())
+    }
+}
+
+impl RouterActor {
+    pub fn subscribe_agent(&mut self, agent_id: AgentId, topic_id: TopicId) {
+        self.topic_subscriptions
+            .entry(topic_id.clone())
+            .or_insert_with(Vec::new)
+            .push(agent_id);
+
+        if let Some(agent_topics) = self.agent_subscriptions.get_mut(&agent_id) {
+            agent_topics.push(topic_id);
+        }
+    }
+
+    pub fn unsubscribe_agent(&mut self, agent_id: AgentId, topic_id: &TopicId) {
+        if let Some(subscribed_agents) = self.topic_subscriptions.get_mut(topic_id) {
+            subscribed_agents.retain(|id| *id != agent_id);
+        }
+
+        if let Some(agent_topics) = self.agent_subscriptions.get_mut(&agent_id) {
+            agent_topics.retain(|t| t != topic_id);
+        }
     }
 }
