@@ -1,6 +1,6 @@
 use crate::actor::{
-    ActorContext, AgentId, AgentMessage, AgentState, MessageEnvelope, RouterActor, RouterMessage,
-    TopicId,
+    ActorContext, AgentId, AgentMessage, AgentState, MessageContext, MessageEnvelope, RouterActor,
+    RouterMessage, TopicId,
 };
 use log::debug;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
@@ -68,7 +68,7 @@ impl Actor for RouterActor {
                         );
                         for agent_id in subscribed_agents {
                             if let Some(agent_ref) = state.agents.get(agent_id) {
-                                let context = ActorContext::new()
+                                let context = MessageContext::new()
                                     .with_sender(*agent_id)
                                     .with_topic(topic_id.clone());
                                 let agent_msg = MessageEnvelope::new(
@@ -86,7 +86,7 @@ impl Actor for RouterActor {
                 if let Some(subscribed_agents) = state.topic_subscriptions.get(&topic_id) {
                     for agent_id in subscribed_agents {
                         if let Some(agent_ref) = state.agents.get(agent_id) {
-                            let context = ActorContext::new()
+                            let context = MessageContext::new()
                                 .with_sender(*agent_id)
                                 .with_topic(topic_id.clone());
 

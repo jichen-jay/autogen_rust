@@ -3,7 +3,8 @@
 use anyhow::Result;
 use async_openai::types::Role;
 use autogen_rust::actor::{
-    ActorContext, AgentActor, AgentState, MessageEnvelope, RouterActor, RouterMessage,
+    ActorContext, AgentActor, AgentState, MessageContext, MessageEnvelope, RouterActor,
+    RouterMessage,
 };
 use autogen_rust::llama_structs::output_llama_response;
 use autogen_rust::llm_utils::*;
@@ -18,7 +19,6 @@ use uuid::Uuid;
 async fn main() -> Result<()> {
     dotenv::dotenv().ok();
     env_logger::init();
-
 
     let router_actor_instance = RouterActor {
         agents: HashMap::new(),
@@ -57,16 +57,20 @@ async fn main() -> Result<()> {
     });
 
     let msg_envelope = MessageEnvelope::new(
-        ActorContext::new().with_sender(agent_id),
+        MessageContext::new().with_sender(agent_id),
         RouterMessage::UpdateState(state_update),
     );
 
     router_actor.send_message(msg_envelope)?;
 
-    let hello_msg = Message::new(Content::Text("calculate 1 + 2".to_string()), None, Role::User);
+    let hello_msg = Message::new(
+        Content::Text("calculate 1 + 2".to_string()),
+        None,
+        Role::User,
+    );
 
     let msg_envelope = MessageEnvelope::new(
-        ActorContext::new()
+        MessageContext::new()
             .with_sender(agent_id)
             .with_topic("chat".to_string()),
         RouterMessage::RouteMessage(hello_msg),
@@ -79,6 +83,5 @@ async fn main() -> Result<()> {
     router_handle.await?;
     agent_handle.await?;
 
-        return Ok(());
-
+    return Ok(());
 }

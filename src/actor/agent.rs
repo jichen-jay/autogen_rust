@@ -1,5 +1,6 @@
 use crate::actor::{
-    ActorContext, AgentActor, AgentMessage, AgentState, MessageEnvelope, RouterMessage,
+    ActorContext, AgentActor, AgentMessage, AgentState, MessageContext, MessageEnvelope,
+    RouterMessage,
 };
 use crate::immutable_agent::{LlmAgent, Message};
 use crate::llama_structs::Content;
@@ -22,10 +23,11 @@ impl Actor for AgentActor {
     ) -> Result<Self::State, ActorProcessingErr> {
         let (id, router, llm_agent) = args;
 
-        let context = ActorContext::new().with_sender(id);
+        let message_context = MessageContext::new().with_sender(id);
+        let actor_context = ActorContext::new().with_sender(id);
 
         let register_msg = MessageEnvelope::new(
-            context.clone(),
+            message_context,
             RouterMessage::RegisterAgent(myself.clone()),
         );
         router.send_message(register_msg)?;
@@ -35,7 +37,7 @@ impl Actor for AgentActor {
             router: router.clone(),
             subscribed_topics: Vec::new(),
             state: AgentState::Ready,
-            context: context,
+            context: actor_context,
             llm: llm_agent,
         })
     }

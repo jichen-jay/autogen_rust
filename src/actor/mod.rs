@@ -12,20 +12,22 @@ pub type AgentId = Uuid;
 pub type TopicId = String;
 
 #[derive(Debug, Clone)]
-pub struct ActorContext {
+pub struct Context<M> {
     pub sender: Option<AgentId>,
     pub topic_id: Option<TopicId>,
-    pub cancellation_token: PhantomData<()>,
     pub timestamp: SystemTime,
+    pub cancellation_token: PhantomData<()>,
+    pub marker: PhantomData<M>,
 }
 
-impl ActorContext {
+impl<M> Context<M> {
     pub fn new() -> Self {
         Self {
             sender: None,
             topic_id: None,
-            cancellation_token: PhantomData,
             timestamp: SystemTime::now(),
+            cancellation_token: PhantomData,
+            marker: PhantomData,
         }
     }
 
@@ -41,13 +43,21 @@ impl ActorContext {
 }
 
 #[derive(Debug, Clone)]
+pub struct ActorMarker;
+#[derive(Debug, Clone)]
+pub struct MessageMarker;
+
+pub type ActorContext = Context<ActorMarker>;
+pub type MessageContext = Context<MessageMarker>;
+
+#[derive(Debug, Clone)]
 pub struct MessageEnvelope<T> {
-    pub context: ActorContext,
+    pub context: MessageContext,
     pub payload: T,
 }
 
 impl<T> MessageEnvelope<T> {
-    pub fn new(context: ActorContext, payload: T) -> Self {
+    pub fn new(context: MessageContext, payload: T) -> Self {
         Self { context, payload }
     }
 }
