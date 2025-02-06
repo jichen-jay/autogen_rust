@@ -23,6 +23,7 @@ impl Actor for RouterActor {
             agent_subscriptions: HashMap::new(),
             agent_states: HashMap::new(),
             context: ActorContext::new(),
+            llm: None,
         })
     }
 
@@ -36,7 +37,7 @@ impl Actor for RouterActor {
         let sender_id = envelope.context.sender;
         match envelope.payload {
             RouterMessage::UpdateState(state_fn) => {
-                debug!(
+                println!(
                     "RouterActor received update_state message: {:?}",
                     state.context
                 );
@@ -45,7 +46,7 @@ impl Actor for RouterActor {
             }
             RouterMessage::RegisterAgent(actor_ref) => {
                 if let Some(agent_id) = sender_id {
-                    debug!(
+                    println!(
                         "RouterActor received register message from agent: {:?}",
                         agent_id
                     );
@@ -58,22 +59,23 @@ impl Actor for RouterActor {
 
             RouterMessage::RouteMessage(msg) => {
                 if let Some(topic_id) = envelope.context.topic_id {
-                    debug!("RouterActor received routeMessage on topic: {:?}", topic_id);
+                    println!("RouterActor received routeMessage on topic: {:?}", topic_id);
 
                     if let Some(subscribed_agents) = state.topic_subscriptions.get(&topic_id) {
+                        println!(
+                            "RouterActor received routeMessage addressed to : {:?}",
+                            subscribed_agents.clone()
+                        );
                         for agent_id in subscribed_agents {
                             if let Some(agent_ref) = state.agents.get(agent_id) {
-                                if let Some(AgentState::Ready) = state.agent_states.get(agent_id) {
-                                    let context = ActorContext::new()
-                                        .with_sender(*agent_id)
-                                        .with_topic(topic_id.clone());
-
-                                    let agent_msg = MessageEnvelope::new(
-                                        context,
-                                        AgentMessage::Process(msg.clone()),
-                                    );
-                                    agent_ref.send_message(agent_msg)?;
-                                }
+                                let context = ActorContext::new()
+                                    .with_sender(*agent_id)
+                                    .with_topic(topic_id.clone());
+                                let agent_msg = MessageEnvelope::new(
+                                    context,
+                                    AgentMessage::Process(msg.clone()),
+                                );
+                                agent_ref.send_message(agent_msg)?;
                             }
                         }
                     }

@@ -46,37 +46,36 @@ impl Actor for AgentActor {
         envelope: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        let mut context = state.context.clone();
+        let mut context = envelope.context.clone();
         context.timestamp = SystemTime::now();
 
         match envelope.payload {
             AgentMessage::Process(content) => {
                 state.state = AgentState::Processing;
-                debug!("Agent {} processing message: {:?}", self.agent_id, content);
+                println!("Agent {} processing message: {:?}", self.agent_id, content);
 
-                let input = match content.content {
-                    Content::Text(tex) => tex.to_string(),
-                    _ => "placeholder".to_string(),
-                };
+                let input = content.content.content_to_string();
 
                 let response = self.llm.default_method(&input).await?;
-                debug!("llm response: {:?}", response);
+                println!("llm response: {:?}", response);
 
+                let new_context = context.clone(); // Now new_context still has the topic from envelope
                 let route_msg = MessageEnvelope::new(
-                    context.clone(),
+                    new_context,
                     RouterMessage::RouteMessage(Message::new(
                         Content::Text(response),
                         None,
                         Role::Assistant,
                     )),
                 );
+
                 state.router.send_message(route_msg)?;
 
                 state.state = AgentState::Ready;
             }
 
             AgentMessage::UpdateState(new_state) => {
-                debug!("Agent {} updating state: {:?}", self.agent_id, new_state);
+                println!("Agent {} updating state: {:?}", self.agent_id, new_state);
                 state.state = new_state;
             }
         }

@@ -16,12 +16,26 @@ pub enum Content {
     ToolCall(ToolCall),
 }
 
+impl Content {
+    pub fn content_to_string(&self) -> String {
+        match self {
+            Content::Text(tex) => tex.to_string(),
+            Content::ToolCall(tc) => format!("{:?}", tc),
+        }
+    }
+
+    pub fn from_str(input: &str) -> Content {
+        Content::Text(input.to_string())
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct LlamaResponseMessage {
     pub content: Content,
     pub role: Role,
     pub usage: CompletionUsage,
 }
+
 impl LlamaResponseMessage {
     pub fn content_to_string(&self) -> String {
         match &self.content {

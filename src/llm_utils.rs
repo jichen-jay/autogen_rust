@@ -43,7 +43,12 @@ pub async fn chat_inner_async_wrapper_text(
             println!("response_body: {:?}", response_body.clone());
             let raw_output = serde_json::from_str::<CreateChatCompletionResponse>(&response_body)?;
 
-            let out = raw_output.choices[0].message.content.clone().unwrap_or_default();
+            let out = raw_output.choices[0]
+                .message
+                .content
+                .clone()
+                .unwrap_or_default();
+            println!("text result: {:?}", out.clone());
             Ok(out)
         }
         Err(_e) => {

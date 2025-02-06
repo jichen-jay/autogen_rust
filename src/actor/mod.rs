@@ -66,6 +66,7 @@ pub enum RouterMessage {
     InternalBroadcast(TopicId, Message),
     UpdateState(Box<dyn FnOnce(&mut RouterActor) + Send>),
 }
+
 impl std::fmt::Debug for RouterMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -106,4 +107,5 @@ pub struct RouterActor {
     pub agent_subscriptions: std::collections::HashMap<AgentId, Vec<TopicId>>,
     pub agent_states: std::collections::HashMap<AgentId, AgentState>,
     pub context: ActorContext,
+    pub llm: Option<LlmAgent>,
 }
