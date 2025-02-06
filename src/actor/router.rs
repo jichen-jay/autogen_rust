@@ -2,6 +2,7 @@ use crate::actor::{
     ActorContext, AgentId, AgentMessage, AgentState, MessageEnvelope, RouterActor, RouterMessage,
     TopicId,
 };
+use log::debug;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
 use std::time::SystemTime;
@@ -33,10 +34,22 @@ impl Actor for RouterActor {
     ) -> Result<(), ActorProcessingErr> {
         state.context.timestamp = SystemTime::now();
         let sender_id = envelope.context.sender;
-
         match envelope.payload {
+            RouterMessage::UpdateState(state_fn) => {
+                debug!(
+                    "RouterActor received update_state message: {:?}",
+                    state.context
+                );
+
+                state_fn(state);
+            }
             RouterMessage::RegisterAgent(actor_ref) => {
                 if let Some(agent_id) = sender_id {
+                    debug!(
+                        "RouterActor received register message from agent: {:?}",
+                        agent_id
+                    );
+
                     state.agents.insert(agent_id, actor_ref.clone());
                     state.agent_states.insert(agent_id, AgentState::Ready);
                     state.agent_subscriptions.insert(agent_id, Vec::new());
@@ -45,6 +58,8 @@ impl Actor for RouterActor {
 
             RouterMessage::RouteMessage(msg) => {
                 if let Some(topic_id) = envelope.context.topic_id {
+                    debug!("RouterActor received routeMessage on topic: {:?}", topic_id);
+
                     if let Some(subscribed_agents) = state.topic_subscriptions.get(&topic_id) {
                         for agent_id in subscribed_agents {
                             if let Some(agent_ref) = state.agents.get(agent_id) {

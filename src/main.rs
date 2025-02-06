@@ -1,90 +1,78 @@
 #![allow(warnings, deprecated)]
 
 use anyhow::Result;
-// use autogen_rust::webscraper_hook::*;
-use autogen_rust::{immutable_agent::*, task_ledger};
-use tokio;
+use async_openai::types::Role;
+use autogen_rust::actor::{
+    ActorContext, AgentActor, AgentState, MessageEnvelope, RouterActor, RouterMessage,
+};
+use autogen_rust::{immutable_agent::*, llama_structs::Content};
+use env_logger;
+use ractor::{Actor, ActorRef};
+use std::collections::HashMap;
+use std::marker::PhantomData;
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv::dotenv().ok();
+    env_logger::init();
+    let router_actor_instance = RouterActor {
+        agents: HashMap::new(),
+        topic_subscriptions: HashMap::new(),
+        agent_subscriptions: HashMap::new(),
+        agent_states: HashMap::new(),
+        context: ActorContext::new(),
+    };
 
-    let user_proxy = LlmAgent::simple("");
+    let (router_actor, router_handle) = Actor::spawn(None, router_actor_instance, ()).await?;
 
-    // match run_python_func_react("/Users/jichen/Projects/autogen_rust/src/test.py").await {
-    //     Ok(res) => println!("solution: {:?}\n\n ", res),
-    //     Err(res) => println!("code run error: {:?}\n\n ", res),
-    // };
-    //
-    // return Ok(());
+    let agent_id = Uuid::new_v4();
 
-    // let guide =
-    //     "today is 2024-06-18, find the stock price info of Nvidia in the past month".to_string();
-    //
-    // let ve = search_with_bing(
-    //     "today is 2024-06-18, go get data: https://ca.finance.yahoo.com/quote/NVDA/history",
-    // )
-    // .await?;
-    //
-    // for (url, _) in ve {
-    //     let res = get_webpage_guided(
-    //         "https://ca.finance.yahoo.com/quote/NVDA/history".to_string(),
-    //         &guide,
-    //     )
-    //     .await;
-    //
-    // }
+    let llm_agent = LlmAgent::new("You are a helpful assistant".to_string(), None);
 
-    // let code = user_proxy
-    //     .code_with_python("create a 5x5 tick tac toe game in python")
-    //     .await?;
+    let agent_actor_instance = AgentActor {
+        agent_id,
+        router: router_actor.clone(),
+        subscribed_topics: Vec::new(),
+        state: AgentState::Ready,
+        context: ActorContext::new(),
+        llm: llm_agent.clone(),
+    };
 
-    let (mut task_ledger, solution) = user_proxy
-        // .planning("tell me a joke")
-        .planning(
-            "Today is 2024-03-18. imaging stock price performance of Nvidia in the past month",
-        )
-        .await;
+    let (agent_actor, agent_handle) = Actor::spawn_linked(
+        None,
+        agent_actor_instance,
+        (agent_id, router_actor.clone(), llm_agent),
+        router_actor.clone().into(),
+    )
+    .await?;
 
-    if task_ledger.task_list.is_empty() && solution.is_some() {
-        println!("solution: {:?} ", solution);
-        std::process::exit(0);
-    }
+    let state_update = Box::new(move |router: &mut RouterActor| {
+        router.subscribe_agent(agent_id, "chat".to_string());
+    });
 
-    loop {
-        let task_summary = task_ledger
-            .clone()
-            .parent_task
-            .unwrap_or("no task".to_string());
-        let task = task_ledger.current_task().unwrap_or(task_summary);
-
-        // let _ = user_proxy
-        //     .code_with_python("Write python code to show the stock price performance of Nvidia in the past month")
-        //     .await;
-        let carry_over = match task_ledger.solution_list.last() {
-            Some(c) => Some(c.clone()),
-            None => None,
-        };
-        let res_alt = user_proxy
-            .next_step_by_toolcall(carry_over, &task)
-            .await
-            .unwrap_or("no result generated".to_string());
-        println!("{:?}", res_alt.clone());
-
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-
-        if !task_ledger.record_solution(res_alt) {
-            break;
-        }
-    }
-
-    println!(
-        "{:?}",
-        &task_ledger
-            .solution_list
-            .last()
-            .unwrap_or(&"no final result".to_string())
+    let msg_envelope = MessageEnvelope::new(
+        ActorContext::new().with_sender(agent_id),
+        RouterMessage::UpdateState(state_update),
     );
+
+    router_actor.send_message(msg_envelope)?;
+
+    let hello_msg = Message::new(Content::Text("hello".to_string()), None, Role::User);
+
+    let msg_envelope = MessageEnvelope::new(
+        ActorContext::new()
+            .with_sender(agent_id)
+            .with_topic("chat".to_string()),
+        RouterMessage::RouteMessage(hello_msg),
+    );
+
+    router_actor.send_message(msg_envelope)?;
+
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    router_handle.await?;
+    agent_handle.await?;
 
     Ok(())
 }

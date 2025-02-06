@@ -1,11 +1,16 @@
+use crate::actor::RouterMessage;
 use crate::llama_structs::*;
 use crate::llm_utils::*;
 use crate::task_ledger::*;
 use crate::utils::*;
 // use crate::webscraper_hook::{get_webpage_text, search_with_bing};
+use crate::actor::{AgentActor, AgentId, TopicId};
+use crate::actor::{AgentMessage, MessageEnvelope};
 use crate::{IS_TERMINATION_SYSTEM_PROMPT, ITERATE_NEXT_STEP_TEMPLATE, TOGETHER_CONFIG};
 use anyhow::Result;
 use async_openai::types::Role;
+use log::debug;
+use ractor::ActorRef;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -126,146 +131,32 @@ impl Message {
         Message {
             content,
             name,
-            role, // Set default role to Assistant if None is provided
+            role,
         }
     }
 }
 
-pub type AgentId = Uuid;
-pub type Subscription = HashMap<AgentId, Vec<TopicId>>;
-pub type TopicId = String;
-
+#[derive(Clone)]
 pub struct LlmAgent {
-    pub agent_id: AgentId,
     pub system_prompt: String,
     pub llm_config: Option<Value>,
     pub tools_map_meta: String,
     pub description: String,
-    subscriptions: Arc<RwLock<Subscription>>,
 }
 
 impl LlmAgent {
-    pub fn simple(system_prompt: &str) -> Self {
-        LlmAgent {
-            agent_id: Uuid::new_v4(),
-            system_prompt: system_prompt.to_string(),
-            llm_config: None,
-            tools_map_meta: String::from(""),
-            description: String::from(""),
-            subscriptions: Arc::new(RwLock::new(HashMap::new())),
+    pub fn new(system_prompt: String, llm_config: Option<Value>) -> Self {
+        Self {
+            system_prompt,
+            llm_config,
+            tools_map_meta: String::new(),
+            description: String::new(),
         }
     }
 
-    pub fn add_subscription(&self, topic_id: TopicId) -> Result<(), Box<dyn Error>> {
-        let mut subs = self.subscriptions.write().unwrap();
-        subs.entry(self.agent_id)
-            .or_insert_with(Vec::new)
-            .push(topic_id);
-        Ok(())
-    }
+    pub async fn default_method(&self, input: &str) -> anyhow::Result<String> {
+        debug!("default_method: received input: {:?}", input);
 
-    pub fn get_subscriptions(&self) -> Option<Vec<TopicId>> {
-        let subs = self.subscriptions.read().unwrap();
-        subs.get(&self.agent_id).cloned()
-    }
-
-    pub async fn next_step_by_toolcall(
-        &self,
-        carry_over: Option<String>,
-        input: &str,
-    ) -> anyhow::Result<String> {
-        let max_token = 1000u16;
-        let output: LlamaResponseMessage =
-            chat_inner_async_wrapper(&TOGETHER_CONFIG, NEXT_STEP_BY_TOOLCALL, input, max_token)
-                .await
-                .expect("Failed to generate reply");
-        match &output.content {
-            Content::Text(unexpected_result) => {
-                return Ok(format!(
-                    "attempt to run tool_call failed, returning text result: {} ",
-                    unexpected_result
-                ));
-            }
-            Content::ToolCall(call) => {
-                let args = call.clone().arguments.unwrap_or_default();
-                let res = match call.name.as_str() {
-                    "use_intrinsic_knowledge" => match args.get("task") {
-                        Some(t) => {
-                            println!("entered intrinsic arm: {:?}", t.clone());
-                            //why program doesn't continue to execute the next async func?
-                            match self.iterate_next_step(carry_over, t).await {
-                                Ok(res) => {
-                                    println!("intrinsic result: {:?}", res.clone());
-                                    res
-                                }
-
-                                Err(_) => String::from("failed in use_intrinsic_knowledge"),
-                            }
-                        }
-                        None => String::from("failed in use_intrinsic_knowledge"),
-                    },
-
-                    _ => {
-                        panic!();
-                    }
-                };
-                Ok(res)
-            }
-        }
-    }
-    pub async fn iterate_next_step(
-        &self,
-        carry_over: Option<String>,
-        input: &str,
-    ) -> anyhow::Result<String> {
-        let max_token = 1000u16;
-
-        let formatter = ITERATE_NEXT_STEP_TEMPLATE.lock().unwrap();
-        let user_prompt = match &carry_over {
-            Some(c) => formatter(&[&c, input]),
-            None => input.to_string(),
-        };
-
-        let system_prompt = match &carry_over {
-            Some(_) => ITERATE_NEXT_STEP,
-            None => "<|im_start|>system You are a task solving expert.",
-        };
-        let output: LlamaResponseMessage =
-            chat_inner_async_wrapper(&TOGETHER_CONFIG, ITERATE_NEXT_STEP, &user_prompt, max_token)
-                .await
-                .expect("Failed to generate reply");
-        match &output.content {
-            Content::Text(res) => Ok(res.to_string()),
-            Content::ToolCall(call) => Err(anyhow::Error::msg("entered tool_call arm incorrectly")),
-        }
-    }
-
-    pub async fn planning(&self, input: &str) -> (TaskLedger, Option<String>) {
-        let max_token = 500u16;
-        let output: LlamaResponseMessage =
-            chat_inner_async_wrapper(&TOGETHER_CONFIG, NEXT_STEP_PLANNING, input, max_token)
-                .await
-                .expect("Failed to generate reply");
-
-        match &output.content {
-            Content::Text(_out) => {
-                let (task_list, task_summary, solution_found) = parse_planning_sub_tasks(_out);
-                println!(
-                    "sub_tasks: {:?}\n task_summary: {:?}",
-                    task_list.clone(),
-                    task_summary.clone()
-                );
-
-                (
-                    TaskLedger::new(task_list, Some(task_summary)),
-                    Some(solution_found),
-                )
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    pub async fn simple_reply(&self, input: &str) -> anyhow::Result<bool> {
         let user_prompt = format!("Here is the task for you: {:?}", input);
 
         let max_token = 1000u16;
@@ -278,56 +169,12 @@ impl LlmAgent {
         .await
         .expect("Failed to generate reply");
 
-        match &output.content {
-            Content::Text(_out) => {
-                let (terminate_or_not, key_points) =
-                    self._is_termination(&_out, &user_prompt).await;
+        debug!("default_method: generated output: {:?}", output);
 
-                println!(
-                    "terminate?: {:?}, points: {:?}\n",
-                    terminate_or_not.clone(),
-                    key_points.clone()
-                );
-                if terminate_or_not {
-                    let _ = get_user_feedback().await;
-                }
-                return Ok(terminate_or_not);
-            }
+        match &output.content {
+            Content::Text(_out) => Ok(_out.to_string()),
             _ => unreachable!(),
         }
-    }
-
-    pub async fn _is_termination(
-        &self,
-        current_text_result: &str,
-        instruction: &str,
-    ) -> (bool, String) {
-        let user_prompt = format!(
-            "Given the task: {:?}, examine current result: {}, please decide whether the task is done or not",
-            instruction,
-            current_text_result
-        );
-
-        println!("{:?}", user_prompt.clone());
-
-        let raw_reply = chat_inner_async_wrapper(
-            &TOGETHER_CONFIG,
-            &IS_TERMINATION_SYSTEM_PROMPT,
-            &user_prompt,
-            300,
-        )
-        .await
-        .expect("llm generation failure");
-
-        println!(
-            "_is_termination raw_reply: {:?}",
-            raw_reply.content_to_string()
-        );
-
-        let (terminate_or_not, _, key_points) =
-            parse_next_move_and_(&raw_reply.content_to_string(), None);
-
-        (terminate_or_not, key_points.join(","))
     }
 }
 

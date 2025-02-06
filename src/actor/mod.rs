@@ -1,15 +1,15 @@
 pub mod agent;
 pub mod router;
 
+use crate::immutable_agent::{LlmAgent, Message};
 use ractor::ActorRef;
 use std::error::Error;
 use std::marker::PhantomData;
 use std::time::SystemTime;
 use uuid::Uuid;
+
 pub type AgentId = Uuid;
 pub type TopicId = String;
-
-use crate::immutable_agent::Message;
 
 #[derive(Debug, Clone)]
 pub struct ActorContext {
@@ -60,11 +60,29 @@ pub enum AgentState {
     Error(Box<dyn Error + Send + Sync>),
 }
 
-#[derive(Debug)]
 pub enum RouterMessage {
     RegisterAgent(ActorRef<MessageEnvelope<AgentMessage>>),
     RouteMessage(Message),
     InternalBroadcast(TopicId, Message),
+    UpdateState(Box<dyn FnOnce(&mut RouterActor) + Send>),
+}
+impl std::fmt::Debug for RouterMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RouterMessage::RegisterAgent(ref agent) => {
+                f.debug_tuple("RegisterAgent").field(agent).finish()
+            }
+            RouterMessage::RouteMessage(ref msg) => {
+                f.debug_tuple("RouteMessage").field(msg).finish()
+            }
+            RouterMessage::InternalBroadcast(ref topic, ref msg) => f
+                .debug_tuple("InternalBroadcast")
+                .field(topic)
+                .field(msg)
+                .finish(),
+            RouterMessage::UpdateState(_) => f.write_str("UpdateState(<closure>)"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -79,6 +97,7 @@ pub struct AgentActor {
     pub subscribed_topics: Vec<TopicId>,
     pub state: AgentState,
     pub context: ActorContext,
+    pub llm: LlmAgent,
 }
 
 pub struct RouterActor {
