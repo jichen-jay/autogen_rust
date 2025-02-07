@@ -8,8 +8,20 @@ use async_openai::types::Role;
 use futures::TryFutureExt;
 use log::debug;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
+use std::fmt;
 use std::time::SystemTime;
 use uuid::Uuid;
+
+#[derive(Debug)]
+struct ShutdownError(String);
+
+impl fmt::Display for ShutdownError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for ShutdownError {}
 
 impl Actor for AgentActor {
     type Msg = MessageEnvelope<AgentMessage>;
@@ -28,7 +40,10 @@ impl Actor for AgentActor {
 
         let register_msg = MessageEnvelope::new(
             message_context,
-            RouterMessage::RegisterAgent(myself.clone()),
+            RouterMessage::RegisterAgent {
+                agent: myself.clone(),
+                cancellation_token: actor_context.cancellation_token.clone(),
+            },
         );
         router.send_message(register_msg)?;
 
@@ -79,6 +94,17 @@ impl Actor for AgentActor {
             AgentMessage::UpdateState(new_state) => {
                 println!("Agent {} updating state: {:?}", self.agent_id, new_state);
                 state.state = new_state;
+            }
+
+            AgentMessage::Shutdown => {
+                println!(
+                    "Agent {} received Shutdown. Cleaning up and shutting down...",
+                    self.agent_id
+                );
+                state.state = AgentState::PendingShutdown;
+                return Err(Box::new(ShutdownError(
+                    "Agent shutdown requested".to_string(),
+                )));
             }
         }
 

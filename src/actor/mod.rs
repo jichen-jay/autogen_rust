@@ -3,9 +3,11 @@ pub mod router;
 
 use crate::immutable_agent::{LlmAgent, Message};
 use ractor::ActorRef;
+use std::collections::HashMap;
 use std::error::Error;
 use std::marker::PhantomData;
 use std::time::SystemTime;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub type AgentId = Uuid;
@@ -16,7 +18,7 @@ pub struct Context<M> {
     pub sender: Option<AgentId>,
     pub topic_id: Option<TopicId>,
     pub timestamp: SystemTime,
-    pub cancellation_token: PhantomData<()>,
+    pub cancellation_token: CancellationToken, // CHANGED: Now a real token
     pub marker: PhantomData<M>,
 }
 
@@ -26,7 +28,7 @@ impl<M> Context<M> {
             sender: None,
             topic_id: None,
             timestamp: SystemTime::now(),
-            cancellation_token: PhantomData,
+            cancellation_token: CancellationToken::new(), // CHANGED
             marker: PhantomData,
         }
     }
@@ -44,6 +46,7 @@ impl<M> Context<M> {
 
 #[derive(Debug, Clone)]
 pub struct ActorMarker;
+
 #[derive(Debug, Clone)]
 pub struct MessageMarker;
 
@@ -71,16 +74,20 @@ pub enum AgentState {
 }
 
 pub enum RouterMessage {
-    RegisterAgent(ActorRef<MessageEnvelope<AgentMessage>>),
+    RegisterAgent {
+        agent: ActorRef<MessageEnvelope<AgentMessage>>,
+        cancellation_token: CancellationToken, // CHANGED
+    },
     RouteMessage(Message),
     InternalBroadcast(TopicId, Message),
     UpdateState(Box<dyn FnOnce(&mut RouterActor) + Send>),
+    ShutdownAgent(AgentId), // CHANGED: New variant to shutdown an agent.
 }
 
 impl std::fmt::Debug for RouterMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RouterMessage::RegisterAgent(ref agent) => {
+            RouterMessage::RegisterAgent { agent, .. } => {
                 f.debug_tuple("RegisterAgent").field(agent).finish()
             }
             RouterMessage::RouteMessage(ref msg) => {
@@ -92,6 +99,9 @@ impl std::fmt::Debug for RouterMessage {
                 .field(msg)
                 .finish(),
             RouterMessage::UpdateState(_) => f.write_str("UpdateState(<closure>)"),
+            RouterMessage::ShutdownAgent(agent_id) => {
+                f.debug_tuple("ShutdownAgent").field(agent_id).finish() // CHANGED
+            }
         }
     }
 }
@@ -100,6 +110,7 @@ impl std::fmt::Debug for RouterMessage {
 pub enum AgentMessage {
     Process(Message),
     UpdateState(AgentState),
+    Shutdown, // CHANGED: New variant to signal the agent to shutdown.
 }
 
 pub struct AgentActor {
@@ -116,6 +127,7 @@ pub struct RouterActor {
     pub topic_subscriptions: std::collections::HashMap<TopicId, Vec<AgentId>>,
     pub agent_subscriptions: std::collections::HashMap<AgentId, Vec<TopicId>>,
     pub agent_states: std::collections::HashMap<AgentId, AgentState>,
+    pub agent_tokens: HashMap<AgentId, CancellationToken>, // CHANGED: Store tokens here.
     pub context: ActorContext,
     pub llm: Option<LlmAgent>,
 }

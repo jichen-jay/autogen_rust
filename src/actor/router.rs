@@ -6,6 +6,7 @@ use log::debug;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
 use std::time::SystemTime;
+use tokio_util::sync::CancellationToken; // CHANGED
 
 impl Actor for RouterActor {
     type Msg = MessageEnvelope<RouterMessage>;
@@ -22,57 +23,56 @@ impl Actor for RouterActor {
             topic_subscriptions: HashMap::new(),
             agent_subscriptions: HashMap::new(),
             agent_states: HashMap::new(),
+            agent_tokens: HashMap::new(), // CHANGED
             context: ActorContext::new(),
             llm: None,
         })
     }
-
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         envelope: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         state.context.timestamp = SystemTime::now();
-        let sender_id = envelope.context.sender;
         match envelope.payload {
             RouterMessage::UpdateState(state_fn) => {
-                println!(
+                log::debug!(
                     "RouterActor received update_state message: {:?}",
                     state.context
                 );
-
                 state_fn(state);
             }
-            RouterMessage::RegisterAgent(actor_ref) => {
-                if let Some(agent_id) = sender_id {
-                    println!(
+            RouterMessage::RegisterAgent {
+                agent,
+                cancellation_token,
+            } => {
+                if let Some(agent_id) = envelope.context.sender {
+                    log::debug!(
                         "RouterActor received register message from agent: {:?}",
                         agent_id
                     );
-
-                    state.agents.insert(agent_id, actor_ref.clone());
+                    state.agents.insert(agent_id, agent.clone());
                     state.agent_states.insert(agent_id, AgentState::Ready);
                     state.agent_subscriptions.insert(agent_id, Vec::new());
+                    state.agent_tokens.insert(agent_id, cancellation_token); // CHANGED
                 }
             }
-
             RouterMessage::RouteMessage(msg) => {
                 if let Some(topic_id) = envelope.context.topic_id {
-                    println!("RouterActor received routeMessage on topic: {:?}", topic_id);
-
+                    log::debug!("RouterActor received routeMessage on topic: {:?}", topic_id);
                     if let Some(subscribed_agents) = state.topic_subscriptions.get(&topic_id) {
-                        println!(
-                            "RouterActor received routeMessage addressed to : {:?}",
+                        log::debug!(
+                            "RouterActor received routeMessage addressed to agents: {:?}",
                             subscribed_agents.clone()
                         );
                         for agent_id in subscribed_agents {
                             if let Some(agent_ref) = state.agents.get(agent_id) {
-                                let context = MessageContext::new()
+                                let message_context = MessageContext::new()
                                     .with_sender(*agent_id)
                                     .with_topic(topic_id.clone());
                                 let agent_msg = MessageEnvelope::new(
-                                    context,
+                                    message_context,
                                     AgentMessage::Process(msg.clone()),
                                 );
                                 agent_ref.send_message(agent_msg)?;
@@ -81,24 +81,41 @@ impl Actor for RouterActor {
                     }
                 }
             }
-
             RouterMessage::InternalBroadcast(topic_id, msg) => {
                 if let Some(subscribed_agents) = state.topic_subscriptions.get(&topic_id) {
                     for agent_id in subscribed_agents {
                         if let Some(agent_ref) = state.agents.get(agent_id) {
-                            let context = MessageContext::new()
+                            let message_context = MessageContext::new()
                                 .with_sender(*agent_id)
                                 .with_topic(topic_id.clone());
-
-                            let agent_msg =
-                                MessageEnvelope::new(context, AgentMessage::Process(msg.clone()));
+                            let agent_msg = MessageEnvelope::new(
+                                message_context,
+                                AgentMessage::Process(msg.clone()),
+                            );
                             agent_ref.send_message(agent_msg)?;
                         }
                     }
                 }
             }
+            RouterMessage::ShutdownAgent(agent_id) => {
+                log::debug!("RouterActor received ShutdownAgent for {:?}", agent_id); // CHANGED
+                                                                                      // Look up the cancellation token and cancel it.
+                if let Some(token) = state.agent_tokens.get(&agent_id) {
+                    token.cancel(); // CHANGED: Signal cancellation.
+                }
+                // Optionally update the agent state.
+                state
+                    .agent_states
+                    .insert(agent_id, AgentState::PendingShutdown); // CHANGED
+                                                                    // Send a shutdown message to the agent so that it can cleanup.
+                if let Some(agent_ref) = state.agents.get(&agent_id) {
+                    let message_context = MessageContext::new().with_sender(agent_id);
+                    let shutdown_msg =
+                        MessageEnvelope::new(message_context, AgentMessage::Shutdown);
+                    agent_ref.send_message(shutdown_msg)?;
+                }
+            }
         }
-
         Ok(())
     }
 }

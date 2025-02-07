@@ -13,6 +13,7 @@ use env_logger;
 use ractor::{Actor, ActorRef};
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[tokio::main]
@@ -20,22 +21,23 @@ async fn main() -> Result<()> {
     dotenv::dotenv().ok();
     env_logger::init();
 
-    let router_actor_instance = RouterActor {
+    let router_actor_obj = RouterActor {
         agents: HashMap::new(),
         topic_subscriptions: HashMap::new(),
         agent_subscriptions: HashMap::new(),
         agent_states: HashMap::new(),
+        agent_tokens: HashMap::new(),
         context: ActorContext::new(),
         llm: None,
     };
 
-    let (router_actor, router_handle) = Actor::spawn(None, router_actor_instance, ()).await?;
+    let (router_actor, router_handle) = Actor::spawn(None, router_actor_obj, ()).await?;
 
     let agent_id = Uuid::new_v4();
 
     let llm_agent = LlmAgent::new("You are a helpful assistant".to_string(), None);
 
-    let agent_actor_instance = AgentActor {
+    let agent_actor_obj = AgentActor {
         agent_id,
         router: router_actor.clone(),
         subscribed_topics: Vec::new(),
@@ -46,7 +48,7 @@ async fn main() -> Result<()> {
 
     let (agent_actor, agent_handle) = Actor::spawn_linked(
         None,
-        agent_actor_instance,
+        agent_actor_obj,
         (agent_id, router_actor.clone(), llm_agent),
         router_actor.clone().into(),
     )
@@ -78,10 +80,15 @@ async fn main() -> Result<()> {
 
     router_actor.send_message(msg_envelope)?;
 
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
 
-    router_handle.await?;
-    agent_handle.await?;
+    let shutdown_msg = MessageEnvelope {
+        context: MessageContext::new().with_sender(agent_id),
+        payload: RouterMessage::ShutdownAgent(agent_id),
+    };
+    router_actor.send_message(shutdown_msg)?;
+
+    let _ = agent_handle.await;
 
     return Ok(());
 }
