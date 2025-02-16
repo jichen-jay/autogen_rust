@@ -1,3 +1,8 @@
+//this project is being transformed
+//previous iteration used more nested Message structure for agent and router
+//here, the mid layer wrapper is removed, both agent and router handle llm Message directly
+//Router spawns, shutdown agents directly; when to do it is yet to be fleshed out
+
 pub mod agent;
 pub mod router;
 
@@ -7,7 +12,6 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::marker::PhantomData;
 use std::time::SystemTime;
-use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub type AgentId = Uuid;
@@ -18,7 +22,6 @@ pub struct Context<M> {
     pub sender: Option<AgentId>,
     pub topic_id: Option<TopicId>,
     pub timestamp: SystemTime,
-    pub cancellation_token: CancellationToken, // CHANGED: Now a real token
     pub marker: PhantomData<M>,
 }
 
@@ -28,7 +31,6 @@ impl<M> Context<M> {
             sender: None,
             topic_id: None,
             timestamp: SystemTime::now(),
-            cancellation_token: CancellationToken::new(), // CHANGED
             marker: PhantomData,
         }
     }
@@ -70,64 +72,24 @@ pub enum AgentState {
     Ready,
     Processing,
     PendingShutdown,
-    Error(Box<dyn Error + Send + Sync>),
-}
-
-pub enum RouterMessage {
-    RegisterAgent {
-        agent: ActorRef<MessageEnvelope<AgentMessage>>,
-        cancellation_token: CancellationToken, // CHANGED
-    },
-    RouteMessage(Message),
-    InternalBroadcast(TopicId, Message),
-    UpdateState(Box<dyn FnOnce(&mut RouterActor) + Send>),
-    ShutdownAgent(AgentId), // CHANGED: New variant to shutdown an agent.
-}
-
-impl std::fmt::Debug for RouterMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RouterMessage::RegisterAgent { agent, .. } => {
-                f.debug_tuple("RegisterAgent").field(agent).finish()
-            }
-            RouterMessage::RouteMessage(ref msg) => {
-                f.debug_tuple("RouteMessage").field(msg).finish()
-            }
-            RouterMessage::InternalBroadcast(ref topic, ref msg) => f
-                .debug_tuple("InternalBroadcast")
-                .field(topic)
-                .field(msg)
-                .finish(),
-            RouterMessage::UpdateState(_) => f.write_str("UpdateState(<closure>)"),
-            RouterMessage::ShutdownAgent(agent_id) => {
-                f.debug_tuple("ShutdownAgent").field(agent_id).finish() // CHANGED
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum AgentMessage {
-    Process(Message),
-    UpdateState(AgentState),
-    Shutdown, // CHANGED: New variant to signal the agent to shutdown.
 }
 
 pub struct AgentActor {
     pub agent_id: AgentId,
-    pub router: ActorRef<MessageEnvelope<RouterMessage>>,
+    pub router: ActorRef<MessageEnvelope<Message>>,
     pub subscribed_topics: Vec<TopicId>,
     pub state: AgentState,
     pub context: ActorContext,
     pub llm: LlmAgent,
 }
 
+//do we need a RouterState enum or struct also?
+//are there additional data to carry other than the RouterActor struct?
 pub struct RouterActor {
-    pub agents: std::collections::HashMap<AgentId, ActorRef<MessageEnvelope<AgentMessage>>>,
+    pub agents: std::collections::HashMap<AgentId, ActorRef<MessageEnvelope<Message>>>,
     pub topic_subscriptions: std::collections::HashMap<TopicId, Vec<AgentId>>,
     pub agent_subscriptions: std::collections::HashMap<AgentId, Vec<TopicId>>,
     pub agent_states: std::collections::HashMap<AgentId, AgentState>,
-    pub agent_tokens: HashMap<AgentId, CancellationToken>, // CHANGED: Store tokens here.
     pub context: ActorContext,
     pub llm: Option<LlmAgent>,
 }
