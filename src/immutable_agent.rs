@@ -1,5 +1,4 @@
-use crate::actor::MessageEnvelope;
-use crate::actor::{AgentActor, AgentId, TopicId};
+use crate::actor::{agent::AgentActor, AgentId, TopicId};
 use crate::llama_structs::*;
 use crate::llm_utils::*;
 use crate::utils::*;

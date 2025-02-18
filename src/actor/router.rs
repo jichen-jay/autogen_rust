@@ -1,153 +1,304 @@
 use crate::actor::{
-    ActorContext, AgentActor, AgentId, AgentState, Message, MessageContext, MessageEnvelope,
-    RouterActor, TopicId,
+    agent::{AgentActor, AgentState},
+    ActorContext, AgentId, RouterCommand, TopicId,
 };
-use crate::immutable_agent::LlmAgent;
-use log::{debug, error, warn};
-use ractor::{Actor, ActorProcessingErr, ActorRef};
+use crate::immutable_agent::{LlmAgent, Message};
+use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
-use std::time::SystemTime;
-use tokio_util::sync::CancellationToken; // CHANGED
-use uuid::Uuid;
 
-impl Actor for RouterActor {
-    type Msg = MessageEnvelope<Message>;
-    type State = RouterActor;
-    type Arguments = ();
+#[derive(Debug, Default, Clone, PartialEq)]
+pub enum RouterState {
+    Ready,
+    #[default]
+    Off,
+}
 
-    async fn pre_start(
-        &self,
-        _myself: ActorRef<Self::Msg>,
-        _: (),
-    ) -> Result<Self::State, ActorProcessingErr> {
-        Ok(RouterActor {
+#[derive(Debug)]
+pub enum RouterError {
+    NotReady,
+    AgentNotFound(AgentId),
+    SpawnFailed(String),
+    TopicNotFound(TopicId),
+    InvalidState(String),
+}
+
+impl From<RouterError> for ActorProcessingErr {
+    fn from(error: RouterError) -> Self {
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("{:?}", error),
+        ))
+    }
+}
+
+#[derive(Clone)]
+pub struct RouterStateData {
+    agents: HashMap<AgentId, ActorRef<RouterCommand>>,
+    topic_subscriptions: HashMap<TopicId, Vec<AgentId>>,
+    agent_subscriptions: HashMap<AgentId, Vec<TopicId>>,
+    agent_states: HashMap<AgentId, AgentState>,
+    state: RouterState,
+    router: Option<ActorRef<RouterCommand>>, // Make this Optional
+}
+
+impl Default for RouterStateData {
+    fn default() -> Self {
+        Self {
             agents: HashMap::new(),
             topic_subscriptions: HashMap::new(),
             agent_subscriptions: HashMap::new(),
             agent_states: HashMap::new(),
-            context: ActorContext::new(),
-            llm: None,
-        })
-    }
-
-    async fn handle(
-        &self,
-        _myself: ActorRef<Self::Msg>,
-        mut envelope: Self::Msg,
-        state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        state.context.timestamp = SystemTime::now();
-
-        if let Some(ref topic) = envelope.context.topic_id {
-            self.route_message(topic.clone(), envelope.payload.clone())?;
-        } else {
-            warn!(
-                "Received message without a topic in context: {:?}",
-                envelope
-            );
+            state: RouterState::default(),
+            router: None, // Start with None
         }
-        Ok(())
     }
 }
 
-impl RouterActor {
-    pub async fn spawn_agent(
+impl RouterStateData {
+    pub fn set_router(&mut self, router: ActorRef<RouterCommand>) {
+        self.router = Some(router);
+    }
+
+    pub fn new() -> Self {
+        Self {
+            agents: HashMap::new(),
+            topic_subscriptions: HashMap::new(),
+            agent_subscriptions: HashMap::new(),
+            agent_states: HashMap::new(),
+            state: RouterState::Off,
+            router: None,
+        }
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.state == RouterState::Ready
+    }
+
+    fn ensure_ready(&self) -> Result<(), RouterError> {
+        if !self.is_ready() {
+            Err(RouterError::NotReady)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn subscribe_agent(
         &mut self,
-        parent_ref: ActorRef<MessageEnvelope<Message>>, // pass in the parent's actor ref
+        agent_id: AgentId,
+        topic: TopicId,
+    ) -> Result<(), RouterError> {
+        self.ensure_ready()?;
+
+        if !self.agents.contains_key(&agent_id) {
+            return Err(RouterError::AgentNotFound(agent_id));
+        }
+
+        self.topic_subscriptions
+            .entry(topic.clone())
+            .or_insert_with(Vec::new)
+            .push(agent_id);
+
+        self.agent_subscriptions
+            .entry(agent_id)
+            .or_insert_with(Vec::new)
+            .push(topic);
+
+        Ok(())
+    }
+
+    pub fn unsubscribe_agent(
+        &mut self,
+        agent_id: AgentId,
+        topic: &TopicId,
+    ) -> Result<(), RouterError> {
+        self.ensure_ready()?;
+
+        if !self.agents.contains_key(&agent_id) {
+            return Err(RouterError::AgentNotFound(agent_id));
+        }
+
+        if let Some(subscribers) = self.topic_subscriptions.get_mut(topic) {
+            subscribers.retain(|id| *id != agent_id);
+        }
+
+        if let Some(topics) = self.agent_subscriptions.get_mut(&agent_id) {
+            topics.retain(|t| t != topic);
+        }
+
+        Ok(())
+    }
+
+    pub fn get_agent_topics(&self, agent_id: &AgentId) -> Result<Vec<TopicId>, RouterError> {
+        self.ensure_ready()?;
+        self.agent_subscriptions
+            .get(agent_id)
+            .cloned()
+            .ok_or(RouterError::AgentNotFound(*agent_id))
+    }
+
+    pub fn get_topic_subscribers(&self, topic: &TopicId) -> Result<Vec<AgentId>, RouterError> {
+        self.ensure_ready()?;
+        self.topic_subscriptions
+            .get(topic)
+            .cloned()
+            .ok_or(RouterError::TopicNotFound(topic.clone()))
+    }
+
+    async fn spawn_agent(
+        &mut self,
         system_prompt: &str,
         topic: TopicId,
-    ) -> Result<AgentId, ActorProcessingErr> {
-        let new_agent_id = Uuid::new_v4();
-        let new_llm_agent = LlmAgent::new(system_prompt.to_string(), None);
+    ) -> Result<AgentId, RouterError> {
+        self.ensure_ready()?;
 
-        let agent_actor_obj = AgentActor {
-            agent_id: new_agent_id,
-            router: parent_ref.clone().into(),
-            subscribed_topics: Vec::new(),
-            state: AgentState::Ready,
-            context: ActorContext::new().with_sender(new_agent_id),
-            llm: new_llm_agent.clone(),
-        };
+        let new_agent_id = AgentId::new_v4();
+        let llm_agent = LlmAgent::new(system_prompt.to_string(), None);
 
-        let (agent_actor, _) = Actor::spawn_linked(
+        let agent_actor = AgentActor::new(
+            new_agent_id,
+            self.router
+                .as_ref()
+                .expect("Router not initialized")
+                .clone(),
+            llm_agent.clone(),
+        );
+
+        let (agent_ref, _) = Actor::spawn_linked(
             None,
-            agent_actor_obj,
-            (new_agent_id, parent_ref.clone(), new_llm_agent),
-            parent_ref.clone().into(), // use the passed-in parent's actor ref here
+            agent_actor,
+            (
+                new_agent_id,
+                self.router
+                    .as_ref()
+                    .expect("Router not initialized")
+                    .clone(),
+                llm_agent,
+            ),
+            self.router
+                .as_ref()
+                .expect("Router not initialized")
+                .clone()
+                .into(),
         )
-        .await?;
+        .await
+        .map_err(|e| RouterError::SpawnFailed(e.to_string()))?;
 
-        self.agents.insert(new_agent_id, agent_actor);
+        self.agents.insert(new_agent_id, agent_ref);
         self.agent_states.insert(new_agent_id, AgentState::Ready);
         self.agent_subscriptions.insert(new_agent_id, Vec::new());
-        self.subscribe_agent(new_agent_id, topic);
+        self.subscribe_agent(new_agent_id, topic)?;
 
         Ok(new_agent_id)
     }
 
-    pub fn shutdown_agent(&mut self, agent_id: AgentId) -> Result<(), ActorProcessingErr> {
-        let agent = match self.agents.get(&agent_id) {
-            Some(a) => a.clone(),
-            None => return Err("Agent not found during shutdown".into()),
-        };
+    fn shutdown_agent(&mut self, agent_id: AgentId) -> Result<(), RouterError> {
+        let agent_ref = self
+            .agents
+            .remove(&agent_id)
+            .ok_or(RouterError::AgentNotFound(agent_id))?;
 
-        // Mutate state fields.
-        self.agent_states
-            .insert(agent_id, AgentState::PendingShutdown);
-
-        // Clone the topics vector to drop the immutable borrow from self.agent_subscriptions.
-        if let Some(topics) = self.agent_subscriptions.get(&agent_id).cloned() {
+        if let Some(topics) = self.agent_subscriptions.remove(&agent_id) {
             for topic in topics {
-                self.unsubscribe_agent(agent_id, &topic);
-            }
-        }
-
-        // Now release the immutable borrow before calling mutable methods.
-        agent.stop(None);
-
-        self.agents.remove(&agent_id);
-        self.agent_states.remove(&agent_id);
-        self.agent_subscriptions.remove(&agent_id);
-
-        Ok(())
-    }
-
-    pub fn route_message(
-        &self,
-        topic_id: TopicId,
-        message: Message,
-    ) -> Result<(), ActorProcessingErr> {
-        if let Some(subscribed_agents) = self.topic_subscriptions.get(&topic_id) {
-            for agent_id in subscribed_agents {
-                if let Some(agent_ref) = self.agents.get(agent_id) {
-                    let message_context = MessageContext::new()
-                        .with_sender(agent_id.clone())
-                        .with_topic(topic_id.clone());
-                    let agent_msg = MessageEnvelope::new(message_context, message.clone());
-                    agent_ref.send_message(agent_msg)?;
+                if let Some(subscribers) = self.topic_subscriptions.get_mut(&topic) {
+                    subscribers.retain(|id| *id != agent_id);
                 }
             }
         }
+
+        agent_ref.stop(None);
+        self.agent_states.remove(&agent_id);
+
         Ok(())
     }
 
-    pub fn subscribe_agent(&mut self, agent_id: AgentId, topic_id: TopicId) {
-        self.topic_subscriptions
-            .entry(topic_id.clone())
-            .or_insert_with(Vec::new)
-            .push(agent_id);
-        self.agent_subscriptions
-            .entry(agent_id)
-            .or_insert_with(Vec::new)
-            .push(topic_id);
-    }
+    fn route_message(&self, topic: TopicId, message: Message) -> Result<(), RouterError> {
+        self.ensure_ready()?;
 
-    pub fn unsubscribe_agent(&mut self, agent_id: AgentId, topic_id: &TopicId) {
-        if let Some(subscribed_agents) = self.topic_subscriptions.get_mut(topic_id) {
-            subscribed_agents.retain(|id| *id != agent_id);
+        let agent_ids = self
+            .topic_subscriptions
+            .get(&topic)
+            .ok_or(RouterError::TopicNotFound(topic.clone()))?;
+
+        if agent_ids.is_empty() {
+            return Err(RouterError::TopicNotFound(topic));
         }
-        if let Some(agent_topics) = self.agent_subscriptions.get_mut(&agent_id) {
-            agent_topics.retain(|t| t != topic_id);
+
+        for agent_id in agent_ids {
+            if let Some(agent_ref) = self.agents.get(agent_id) {
+                if let Err(e) = agent_ref.cast(RouterCommand::RouteMessage {
+                    topic: topic.clone(),
+                    message: message.clone(),
+                }) {
+                    log::warn!("Failed to route message to agent {}: {:?}", agent_id, e);
+                }
+            }
         }
+
+        Ok(())
+    }
+}
+
+pub struct RouterActor;
+
+impl Default for RouterActor {
+    fn default() -> Self {
+        RouterActor // Simple initialization
+    }
+}
+
+// #[ractor::async_trait]
+impl Actor for RouterActor {
+    type Msg = RouterCommand;
+    type State = RouterStateData; // Use RouterStateData as the state type
+    type Arguments = ();
+
+    async fn pre_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        // Initialize state here
+        Ok(RouterStateData {
+            agents: HashMap::new(),
+            topic_subscriptions: HashMap::new(),
+            agent_subscriptions: HashMap::new(),
+            agent_states: HashMap::new(),
+            state: RouterState::Off,
+            router: Some(myself), // Store the actor's own reference
+        })
+    }
+    async fn handle(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        msg: Self::Msg,
+        state: &mut Self::State, // Use state parameter for mutations
+    ) -> Result<(), ActorProcessingErr> {
+        match msg {
+            RouterCommand::SpawnAgent {
+                system_prompt,
+                topic,
+            } => {
+                state.spawn_agent(&system_prompt, topic).await?;
+            }
+            RouterCommand::RouteMessage { topic, message } => {
+                state.route_message(topic, message)?;
+            }
+            RouterCommand::ShutdownAgent { agent_id } => {
+                state.shutdown_agent(agent_id)?;
+            }
+            RouterCommand::Off => {
+                state.state = RouterState::Off;
+            }
+            RouterCommand::Ready => {
+                state.state = RouterState::Ready;
+            }
+            RouterCommand::SubscribeAgent { agent_id, topic } => {
+                state.subscribe_agent(agent_id, topic)?;
+            }
+            RouterCommand::UnsubscribeAgent { agent_id, topic } => {
+                state.unsubscribe_agent(agent_id, &topic)?;
+            }
+        }
+        Ok(())
     }
 }
