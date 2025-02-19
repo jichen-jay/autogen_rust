@@ -2,13 +2,19 @@ pub mod agent;
 pub mod router;
 
 use crate::immutable_agent::{LlmAgent, Message};
-use ractor::ActorRef;
+use ractor::{ActorRef, RpcReplyPort};
 use std::marker::PhantomData;
 use std::time::SystemTime;
 use uuid::Uuid;
 
 pub type AgentId = Uuid;
 pub type TopicId = String;
+
+// impl TopicId {
+//     fn new(inp: &str) -> Self {
+//         inp.to_string()
+//     }
+// }
 
 #[derive(Debug, Clone)]
 pub struct Context<M> {
@@ -48,15 +54,11 @@ pub struct MessageMarker;
 pub type ActorContext = Context<ActorMarker>;
 pub type MessageContext = Context<MessageMarker>;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub enum RouterCommand {
     #[default]
     Off,
     Ready,
-    SpawnAgent {
-        system_prompt: String,
-        topic: TopicId,
-    },
     RouteMessage {
         topic: TopicId,
         message: Message,
@@ -72,4 +74,12 @@ pub enum RouterCommand {
         agent_id: AgentId,
         topic: TopicId,
     },
+
+    SpawnAgent {
+        system_prompt: String,
+        topic: TopicId,
+        reply_to: RpcReplyPort<SpawnAgentResponse>,
+    },
 }
+
+pub type SpawnAgentResponse = Result<AgentId, String>;

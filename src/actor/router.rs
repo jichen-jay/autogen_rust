@@ -1,6 +1,6 @@
 use crate::actor::{
     agent::{AgentActor, AgentState},
-    ActorContext, AgentId, RouterCommand, TopicId,
+    ActorContext, AgentId, RouterCommand, SpawnAgentResponse, TopicId,
 };
 use crate::immutable_agent::{LlmAgent, Message};
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef};
@@ -277,9 +277,21 @@ impl Actor for RouterActor {
             RouterCommand::SpawnAgent {
                 system_prompt,
                 topic,
-            } => {
-                state.spawn_agent(&system_prompt, topic).await?;
-            }
+                reply_to,
+            } => match state.spawn_agent(&system_prompt, topic.clone()).await {
+                Ok(agent_id) => {
+                    let response = SpawnAgentResponse::Ok(agent_id);
+                    if !reply_to.is_closed() {
+                        let _ = reply_to.send(response);
+                    }
+                }
+                Err(e) => {
+                    let response = SpawnAgentResponse::Err(format!("spawn agent on topic: {} failed", topic));
+                    if !reply_to.is_closed() {
+                        let _ = reply_to.send(response);
+                    }
+                }
+            },
             RouterCommand::RouteMessage { topic, message } => {
                 state.route_message(topic, message)?;
             }
