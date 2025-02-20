@@ -10,12 +10,6 @@ use uuid::Uuid;
 pub type AgentId = Uuid;
 pub type TopicId = String;
 
-// impl TopicId {
-//     fn new(inp: &str) -> Self {
-//         inp.to_string()
-//     }
-// }
-
 #[derive(Debug, Clone)]
 pub struct Context<M> {
     sender: Option<AgentId>,
@@ -62,6 +56,7 @@ pub enum RouterCommand {
     RouteMessage {
         topic: TopicId,
         message: Message,
+        context: ActorContext,
     },
     ShutdownAgent {
         agent_id: AgentId,

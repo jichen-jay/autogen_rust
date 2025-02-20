@@ -45,6 +45,9 @@ async fn main() -> Result<()> {
     // )
     // .await?;
     // println!("Judge agent id: {}", judge_agent_id);
+    // let judge_context = ActorContext::new()
+    //     .with_sender(task_agent_id)
+    //     .with_topic("chat".to_string());
 
     time::sleep(std::time::Duration::from_secs(1)).await;
 
@@ -53,9 +56,17 @@ async fn main() -> Result<()> {
         None,
         Role::User,
     );
+
+    let user_proxy_id = Uuid::new_v4();
+
+    let task_context = ActorContext::new()
+        .with_sender(user_proxy_id)
+        .with_topic("chat".to_string());
+
     router_ref.cast(RouterCommand::RouteMessage {
         topic: "chat".to_string(),
         message: task_message,
+        context: task_context,
     })?;
 
     time::sleep(std::time::Duration::from_secs(3)).await;
@@ -86,7 +97,7 @@ async fn main() -> Result<()> {
     // })?;
 
     router_ref.cast(RouterCommand::Off)?;
-    
+
     time::sleep(std::time::Duration::from_secs(1)).await;
 
     Ok(())

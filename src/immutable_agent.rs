@@ -61,24 +61,19 @@ impl LlmAgent {
         }
     }
 
-    pub async fn default_method(&self, input: &str) -> anyhow::Result<String> {
+    pub async fn default_method(&self, input: &str) -> anyhow::Result<LlamaResponseMessage> {
         println!("default_method: received input: {:?}", input);
 
         let user_prompt = format!("Here is the task for you: {:?}", input);
 
         let max_token = 1000u16;
-        let output = chat_inner_async_wrapper_text(
+        chat_inner_async_wrapper(
             &TOGETHER_CONFIG,
             &self.system_prompt,
             &user_prompt,
             max_token,
         )
         .await
-        .expect("Failed to generate reply");
-
-        println!("default_method: generated output: {:?}", output);
-
-        Ok(output)
     }
 }
 

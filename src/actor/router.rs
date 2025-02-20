@@ -211,7 +211,12 @@ impl RouterStateData {
         Ok(())
     }
 
-    fn route_message(&self, topic: TopicId, message: Message) -> Result<(), RouterError> {
+    fn route_message(
+        &mut self,
+        topic: TopicId,
+        message: Message,
+        context: ActorContext,
+    ) -> Result<(), RouterError> {
         self.ensure_ready()?;
 
         let agent_ids = self
@@ -224,10 +229,16 @@ impl RouterStateData {
         }
 
         for agent_id in agent_ids {
+            // Don't route message back to sender using context
+            if context.sender == Some(*agent_id) {
+                continue;
+            }
+
             if let Some(agent_ref) = self.agents.get(agent_id) {
                 if let Err(e) = agent_ref.cast(RouterCommand::RouteMessage {
                     topic: topic.clone(),
                     message: message.clone(),
+                    context: context.clone(),
                 }) {
                     log::warn!("Failed to route message to agent {}: {:?}", agent_id, e);
                 }
@@ -286,15 +297,22 @@ impl Actor for RouterActor {
                     }
                 }
                 Err(e) => {
-                    let response = SpawnAgentResponse::Err(format!("spawn agent on topic: {} failed", topic));
+                    let response =
+                        SpawnAgentResponse::Err(format!("spawn agent on topic: {} failed", topic));
                     if !reply_to.is_closed() {
                         let _ = reply_to.send(response);
                     }
                 }
             },
-            RouterCommand::RouteMessage { topic, message } => {
-                state.route_message(topic, message)?;
+
+            RouterCommand::RouteMessage {
+                topic,
+                message,
+                context,
+            } => {
+                state.route_message(topic, message, context)?;
             }
+
             RouterCommand::ShutdownAgent { agent_id } => {
                 state.shutdown_agent(agent_id)?;
             }

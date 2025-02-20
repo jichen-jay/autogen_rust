@@ -81,7 +81,18 @@ impl Actor for AgentActor {
                 *state = AgentState::Off;
                 Ok(())
             }
-            (RouterCommand::RouteMessage { message, topic }, AgentState::Ready) => {
+            (
+                RouterCommand::RouteMessage {
+                    message,
+                    topic,
+                    context,
+                },
+                AgentState::Ready,
+            ) => {
+                if context.sender == Some(self.agent_id) {
+                    return Ok(());
+                }
+
                 *state = AgentState::Processing;
                 let input = message.content.content_to_string();
 
@@ -92,7 +103,12 @@ impl Actor for AgentActor {
 
                     let route_msg = RouterCommand::RouteMessage {
                         topic: topic.clone(),
-                        message: Message::new(Content::Text(response), None, Role::Assistant),
+                        message: Message::new(
+                            Content::Text(response.content.content_to_string()),
+                            None,
+                            Role::Assistant,
+                        ),
+                        context: self.context.clone(), // Use agent's context
                     };
                     self.router
                         .send_message(route_msg)
@@ -104,9 +120,10 @@ impl Actor for AgentActor {
                     Err(Box::new(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         "Failed to process LLM response",
-                    )))
+                    ))) // ... error handling
                 }
             }
+
             (RouterCommand::ShutdownAgent { agent_id }, _) if agent_id == self.agent_id => {
                 *state = AgentState::Off;
                 Ok(())
