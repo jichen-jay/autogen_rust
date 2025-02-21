@@ -4,6 +4,7 @@ use crate::actor::{
 };
 use crate::immutable_agent::{LlmAgent, Message};
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef};
+use serde_json::Value;
 use std::collections::HashMap;
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -144,15 +145,24 @@ impl RouterStateData {
             .ok_or(RouterError::TopicNotFound(topic.clone()))
     }
 
-    async fn spawn_agent(
+    //change name to spawn_agent_actor_actor
+    //need to clarify the shared responsibility with spawn_agent_actor method in main.rs
+    async fn spawn_agent_actor(
         &mut self,
         system_prompt: &str,
         topic: TopicId,
+        tools_map_meta: Option<Value>,
     ) -> Result<AgentId, RouterError> {
         self.ensure_ready()?;
 
         let new_agent_id = AgentId::new_v4();
-        let llm_agent = LlmAgent::new(system_prompt.to_string(), None);
+
+        let llm_agent = LlmAgent::build(
+            system_prompt.to_string(),
+            None,           // llm_config (None in this example)
+            tools_map_meta, // tools_map_meta is parsed to decide behavior (user_proxy etc.)
+            String::new(),  // description (can be customized as needed)
+        );
 
         let agent_actor = AgentActor::new(
             new_agent_id,
@@ -186,6 +196,7 @@ impl RouterStateData {
         self.agents.insert(new_agent_id, agent_ref);
         self.agent_states.insert(new_agent_id, AgentState::Ready);
         self.agent_subscriptions.insert(new_agent_id, Vec::new());
+
         self.subscribe_agent(new_agent_id, topic)?;
 
         Ok(new_agent_id)
@@ -288,8 +299,12 @@ impl Actor for RouterActor {
             RouterCommand::SpawnAgent {
                 system_prompt,
                 topic,
+                tools_map_meta,
                 reply_to,
-            } => match state.spawn_agent(&system_prompt, topic.clone()).await {
+            } => match state
+                .spawn_agent_actor(&system_prompt, topic.clone(), tools_map_meta)
+                .await
+            {
                 Ok(agent_id) => {
                     let response = SpawnAgentResponse::Ok(agent_id);
                     if !reply_to.is_closed() {

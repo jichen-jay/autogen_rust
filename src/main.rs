@@ -13,8 +13,10 @@ use autogen_rust::llm_utils::*;
 use autogen_rust::{immutable_agent::*, llama_structs::Content};
 use env_logger;
 use ractor::{call_t, rpc::CallResult, spawn_named, Actor, ActorCell, ActorRef, RpcReplyPort};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::time::Duration;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -34,20 +36,21 @@ async fn main() -> Result<()> {
         router_ref.clone(),
         "You're an AI assistant".to_string(),
         TopicId::from("chat"),
+        None,
     )
     .await?;
     println!("Task agent id: {}", task_agent_id);
 
-    // let judge_agent_id = spawn_agent(
-    //     router_ref.clone(),
-    //     "You're an AI judge, you'll be given a task/solution pair, reply yes if you think the solution is correct, reply no otherwise".to_string(),
-    //     TopicId::from("judge"),
-    // )
-    // .await?;
-    // println!("Judge agent id: {}", judge_agent_id);
-    // let judge_context = ActorContext::new()
-    //     .with_sender(task_agent_id)
-    //     .with_topic("chat".to_string());
+    time::sleep(std::time::Duration::from_secs(1)).await;
+
+    let user_proxy_agent_id = spawn_agent(
+        router_ref.clone(),
+        "You're a user proxy agent, sending tasks".to_string(),
+        TopicId::from("chat"),
+        Some(serde_json::json!({"agent_type": "user_proxy"})),
+    )
+    .await?;
+    println!("User Proxy agent id: {}", user_proxy_agent_id);
 
     time::sleep(std::time::Duration::from_secs(1)).await;
 
@@ -57,12 +60,9 @@ async fn main() -> Result<()> {
         Role::User,
     );
 
-    let user_proxy_id = Uuid::new_v4();
-
     let task_context = ActorContext::new()
-        .with_sender(user_proxy_id)
+        .with_sender(user_proxy_agent_id)
         .with_topic("chat".to_string());
-
     router_ref.cast(RouterCommand::RouteMessage {
         topic: "chat".to_string(),
         message: task_message,
@@ -71,34 +71,21 @@ async fn main() -> Result<()> {
 
     time::sleep(std::time::Duration::from_secs(3)).await;
 
-    // let task_solution_message = Message::new(
-    //     Content::Text("Task: calculate 1 + 2\nSolution: 3".to_string()),
-    //     None,
-    //     Role::Assistant,
-    // );
-    // router_ref.cast(RouterCommand::RouteMessage {
-    //     topic: "judge".to_string(),
-    //     message: task_solution_message,
-    // })?;
+    println!("Notifying UserProxy agent to initiate shutdown (its default_method will read terminal input).");
 
-    // time::sleep(std::time::Duration::from_secs(3)).await;
-    // let judge_reply_message = Message::new(Content::Text("yes".to_string()), None, Role::Assistant);
-    // router_ref.cast(RouterCommand::RouteMessage {
-    //     topic: "judge".to_string(),
-    //     message: judge_reply_message,
-    // })?;
+    // Allow some time for the UserProxy to receive input and process it.
+    time::sleep(Duration::from_secs(5)).await;
 
-    // println!("Judge Agent confirmed the solution as correct. Shutting down Task and Judge Agents.");
+    // Then, main issues shutdown commands to all agents and turns off the router.
     router_ref.cast(RouterCommand::ShutdownAgent {
         agent_id: task_agent_id,
     })?;
-    // router_ref.cast(RouterCommand::ShutdownAgent {
-    //     agent_id: judge_agent_id,
-    // })?;
-
+    router_ref.cast(RouterCommand::ShutdownAgent {
+        agent_id: user_proxy_agent_id,
+    })?;
     router_ref.cast(RouterCommand::Off)?;
 
-    time::sleep(std::time::Duration::from_secs(1)).await;
+    time::sleep(Duration::from_secs(1)).await;
 
     Ok(())
 }
@@ -107,15 +94,17 @@ async fn spawn_agent(
     router_ref: ActorRef<RouterCommand>,
     system_prompt: String,
     topic: TopicId,
+    tools_map_meta: Option<Value>,
 ) -> Result<AgentId> {
     let spawn_response = router_ref
         .call(
             |reply_to| RouterCommand::SpawnAgent {
                 system_prompt,
                 topic,
+                tools_map_meta,
                 reply_to,
             },
-            None, // Optional timeout can be passed here if needed
+            None, // Optional timeout can be passed here if needed.
         )
         .await;
 

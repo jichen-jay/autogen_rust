@@ -3,6 +3,7 @@ pub mod router;
 
 use crate::immutable_agent::{LlmAgent, Message};
 use ractor::{ActorRef, RpcReplyPort};
+use serde_json::Value;
 use std::marker::PhantomData;
 use std::time::SystemTime;
 use uuid::Uuid;
@@ -74,6 +75,7 @@ pub enum RouterCommand {
         system_prompt: String,
         topic: TopicId,
         reply_to: RpcReplyPort<SpawnAgentResponse>,
+        tools_map_meta: Option<Value>,
     },
 }
 

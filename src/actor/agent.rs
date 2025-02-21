@@ -1,5 +1,5 @@
 use crate::actor::{ActorContext, AgentId, MessageContext, RouterCommand, TopicId};
-use crate::immutable_agent::{LlmAgent, Message};
+use crate::immutable_agent::{AgentResponse, LlmAgent, Message};
 use crate::llama_structs::Content;
 use async_openai::types::Role;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
@@ -92,35 +92,53 @@ impl Actor for AgentActor {
                 if context.sender == Some(self.agent_id) {
                     return Ok(());
                 }
-
                 *state = AgentState::Processing;
                 let input = message.content.content_to_string();
 
                 println!("Agent {} processing message: {:?}", self.agent_id, input);
 
-                if let Ok(response) = self.llm.default_method(&input).await {
-                    println!("LLM response: {:?}", response);
-
-                    let route_msg = RouterCommand::RouteMessage {
-                        topic: topic.clone(),
-                        message: Message::new(
-                            Content::Text(response.content.content_to_string()),
-                            None,
-                            Role::Assistant,
-                        ),
-                        context: self.context.clone(), // Use agent's context
-                    };
-                    self.router
-                        .send_message(route_msg)
-                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-
-                    *state = AgentState::Ready;
-                    Ok(())
-                } else {
-                    Err(Box::new(std::io::Error::new(
+                match self.llm.default_method(&input).await {
+                    Ok(agent_response) => {
+                        match agent_response {
+                            AgentResponse::Llama(llama_response) => {
+                                println!("LLM response (Llama): {:?}", llama_response);
+                                let route_msg = RouterCommand::RouteMessage {
+                                    topic: topic.clone(),
+                                    message: Message::new(
+                                        Content::Text(llama_response.content.content_to_string()),
+                                        None,
+                                        Role::Assistant,
+                                    ),
+                                    context: self.context.clone(), // using agent's own context
+                                };
+                                self.router.send_message(route_msg).map_err(|e| {
+                                    Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                                })?;
+                            }
+                            // If we got a Proxy response, use that string directly.
+                            AgentResponse::Proxy(proxy_str) => {
+                                println!("LLM response (Proxy): {:?}", proxy_str);
+                                let route_msg = RouterCommand::RouteMessage {
+                                    topic: topic.clone(),
+                                    message: Message::new(
+                                        Content::Text(proxy_str),
+                                        None,
+                                        Role::Assistant,
+                                    ),
+                                    context: self.context.clone(),
+                                };
+                                self.router.send_message(route_msg).map_err(|e| {
+                                    Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                                })?;
+                            }
+                        }
+                        *state = AgentState::Ready;
+                        Ok(())
+                    }
+                    Err(_e) => Err(Box::new(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         "Failed to process LLM response",
-                    ))) // ... error handling
+                    ))),
                 }
             }
 
