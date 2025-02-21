@@ -5,7 +5,7 @@ use anyhow::Result;
 use async_openai::types::Role;
 use autogen_rust::actor::{
     agent::{AgentActor, AgentState},
-    router::{RouterActor, RouterState, RouterStateData},
+    router::{RouterActor, RouterState, RouterStatus},
     ActorContext, AgentId, MessageContext, RouterCommand, SpawnAgentResponse, TopicId,
 };
 use autogen_rust::llama_structs::output_llama_response;
@@ -47,9 +47,10 @@ async fn main() -> Result<()> {
         router_ref.clone(),
         "You're a user proxy agent, sending tasks".to_string(),
         TopicId::from("chat"),
-        Some(serde_json::json!({"agent_type": "user_proxy"})),
+        Some(serde_json::json!([{"name": "get_user_feedback"}])),
     )
     .await?;
+
     println!("User Proxy agent id: {}", user_proxy_agent_id);
 
     time::sleep(std::time::Duration::from_secs(1)).await;
@@ -73,10 +74,8 @@ async fn main() -> Result<()> {
 
     println!("Notifying UserProxy agent to initiate shutdown (its default_method will read terminal input).");
 
-    // Allow some time for the UserProxy to receive input and process it.
     time::sleep(Duration::from_secs(5)).await;
 
-    // Then, main issues shutdown commands to all agents and turns off the router.
     router_ref.cast(RouterCommand::ShutdownAgent {
         agent_id: task_agent_id,
     })?;

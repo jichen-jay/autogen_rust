@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 #[derive(Debug, Default, Clone, PartialEq)]
-pub enum RouterState {
+pub enum RouterStatus {
     Ready,
     #[default]
     Off,
@@ -33,46 +33,35 @@ impl From<RouterError> for ActorProcessingErr {
 }
 
 #[derive(Clone)]
-pub struct RouterStateData {
+pub struct RouterState {
     agents: HashMap<AgentId, ActorRef<RouterCommand>>,
     topic_subscriptions: HashMap<TopicId, Vec<AgentId>>,
     agent_subscriptions: HashMap<AgentId, Vec<TopicId>>,
     agent_states: HashMap<AgentId, AgentState>,
-    state: RouterState,
-    router: Option<ActorRef<RouterCommand>>, // Make this Optional
+    state: RouterStatus,
+    router: Option<ActorRef<RouterCommand>>,
 }
 
-impl Default for RouterStateData {
+impl Default for RouterState {
     fn default() -> Self {
         Self {
             agents: HashMap::new(),
             topic_subscriptions: HashMap::new(),
             agent_subscriptions: HashMap::new(),
             agent_states: HashMap::new(),
-            state: RouterState::default(),
-            router: None, // Start with None
+            state: RouterStatus::default(),
+            router: None,
         }
     }
 }
 
-impl RouterStateData {
+impl RouterState {
     pub fn set_router(&mut self, router: ActorRef<RouterCommand>) {
         self.router = Some(router);
     }
 
-    pub fn new() -> Self {
-        Self {
-            agents: HashMap::new(),
-            topic_subscriptions: HashMap::new(),
-            agent_subscriptions: HashMap::new(),
-            agent_states: HashMap::new(),
-            state: RouterState::Off,
-            router: None,
-        }
-    }
-
     pub fn is_ready(&self) -> bool {
-        self.state == RouterState::Ready
+        self.state == RouterStatus::Ready
     }
 
     fn ensure_ready(&self) -> Result<(), RouterError> {
@@ -145,9 +134,7 @@ impl RouterStateData {
             .ok_or(RouterError::TopicNotFound(topic.clone()))
     }
 
-    //change name to spawn_agent_actor_actor
-    //need to clarify the shared responsibility with spawn_agent_actor method in main.rs
-    async fn spawn_agent_actor(
+    async fn spawn_agent_w_actor(
         &mut self,
         system_prompt: &str,
         topic: TopicId,
@@ -194,7 +181,8 @@ impl RouterStateData {
         .map_err(|e| RouterError::SpawnFailed(e.to_string()))?;
 
         self.agents.insert(new_agent_id, agent_ref);
-        self.agent_states.insert(new_agent_id, AgentState::Ready);
+        self.agent_states
+            .insert(new_agent_id, AgentState::new(new_agent_id));
         self.agent_subscriptions.insert(new_agent_id, Vec::new());
 
         self.subscribe_agent(new_agent_id, topic)?;
@@ -271,7 +259,7 @@ impl Default for RouterActor {
 // #[ractor::async_trait]
 impl Actor for RouterActor {
     type Msg = RouterCommand;
-    type State = RouterStateData; // Use RouterStateData as the state type
+    type State = RouterState; // Use RouterState as the state type
     type Arguments = ();
 
     async fn pre_start(
@@ -280,12 +268,12 @@ impl Actor for RouterActor {
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         // Initialize state here
-        Ok(RouterStateData {
+        Ok(RouterState {
             agents: HashMap::new(),
             topic_subscriptions: HashMap::new(),
             agent_subscriptions: HashMap::new(),
             agent_states: HashMap::new(),
-            state: RouterState::Off,
+            state: RouterStatus::Off,
             router: Some(myself), // Store the actor's own reference
         })
     }
@@ -302,7 +290,7 @@ impl Actor for RouterActor {
                 tools_map_meta,
                 reply_to,
             } => match state
-                .spawn_agent_actor(&system_prompt, topic.clone(), tools_map_meta)
+                .spawn_agent_w_actor(&system_prompt, topic.clone(), tools_map_meta)
                 .await
             {
                 Ok(agent_id) => {
@@ -332,10 +320,10 @@ impl Actor for RouterActor {
                 state.shutdown_agent(agent_id)?;
             }
             RouterCommand::Off => {
-                state.state = RouterState::Off;
+                state.state = RouterStatus::Off;
             }
             RouterCommand::Ready => {
-                state.state = RouterState::Ready;
+                state.state = RouterStatus::Ready;
             }
             RouterCommand::SubscribeAgent { agent_id, topic } => {
                 state.subscribe_agent(agent_id, topic)?;

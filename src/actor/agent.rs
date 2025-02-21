@@ -7,15 +7,45 @@ use std::fmt;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum AgentState {
+pub enum ProcessingState {
     Ready,
     Processing,
     Off,
 }
 
+#[derive(Debug, Clone)]
+pub struct AgentState {
+    processing_state: ProcessingState,
+    subscribed_topics: Vec<TopicId>,
+    context: ActorContext,
+}
+
 impl AgentState {
-    pub fn new() -> Self {
-        Self::Ready
+    pub fn new(agent_id: AgentId) -> Self {
+        Self {
+            processing_state: ProcessingState::Ready,
+            subscribed_topics: Vec::new(),
+            context: ActorContext::new().with_sender(agent_id),
+        }
+    }
+
+    pub fn add_topic(&mut self, topic: TopicId) {
+        self.subscribed_topics.push(topic.clone());
+        self.context = self.context.clone().with_topic(topic);
+    }
+
+    pub fn remove_topic(&mut self, topic: &TopicId) {
+        self.subscribed_topics.retain(|t| t != topic);
+        if self.context.topic_id.as_ref() == Some(topic) {
+            self.context = self
+                .context
+                .clone()
+                .with_topic(self.subscribed_topics.last().cloned().unwrap_or_default());
+        }
+    }
+
+    pub fn get_context(&self) -> ActorContext {
+        self.context.clone()
     }
 }
 
@@ -33,9 +63,6 @@ impl std::error::Error for ShutdownError {}
 pub struct AgentActor {
     agent_id: AgentId,
     router: ActorRef<RouterCommand>,
-    subscribed_topics: Vec<TopicId>,
-    state: AgentState,
-    context: ActorContext,
     llm: LlmAgent,
 }
 
@@ -44,15 +71,11 @@ impl AgentActor {
         Self {
             agent_id,
             router,
-            subscribed_topics: Vec::new(),
-            state: AgentState::Ready,
-            context: ActorContext::new().with_sender(agent_id),
             llm,
         }
     }
 }
 
-// #[ractor::async_trait]
 impl Actor for AgentActor {
     type Msg = RouterCommand;
     type State = AgentState;
@@ -60,25 +83,25 @@ impl Actor for AgentActor {
 
     async fn pre_start(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        Ok(AgentState::new())
+        Ok(AgentState::new(args.0))
     }
 
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         msg: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match (msg, &state) {
-            (RouterCommand::Ready, AgentState::Off) => {
-                *state = AgentState::Ready;
+        match (msg, &state.processing_state) {
+            (RouterCommand::Ready, ProcessingState::Off) => {
+                state.processing_state = ProcessingState::Ready;
                 Ok(())
             }
-            (RouterCommand::Off, AgentState::Ready | AgentState::Processing) => {
-                *state = AgentState::Off;
+            (RouterCommand::Off, ProcessingState::Ready | ProcessingState::Processing) => {
+                state.processing_state = ProcessingState::Off;
                 Ok(())
             }
             (
@@ -87,12 +110,12 @@ impl Actor for AgentActor {
                     topic,
                     context,
                 },
-                AgentState::Ready,
+                ProcessingState::Ready,
             ) => {
                 if context.sender == Some(self.agent_id) {
                     return Ok(());
                 }
-                *state = AgentState::Processing;
+                state.processing_state = ProcessingState::Processing;
                 let input = message.content.content_to_string();
 
                 println!("Agent {} processing message: {:?}", self.agent_id, input);
@@ -109,13 +132,12 @@ impl Actor for AgentActor {
                                         None,
                                         Role::Assistant,
                                     ),
-                                    context: self.context.clone(), // using agent's own context
+                                    context: state.get_context(),
                                 };
                                 self.router.send_message(route_msg).map_err(|e| {
                                     Box::new(e) as Box<dyn std::error::Error + Send + Sync>
                                 })?;
                             }
-                            // If we got a Proxy response, use that string directly.
                             AgentResponse::Proxy(proxy_str) => {
                                 println!("LLM response (Proxy): {:?}", proxy_str);
                                 let route_msg = RouterCommand::RouteMessage {
@@ -125,14 +147,14 @@ impl Actor for AgentActor {
                                         None,
                                         Role::Assistant,
                                     ),
-                                    context: self.context.clone(),
+                                    context: state.get_context(),
                                 };
                                 self.router.send_message(route_msg).map_err(|e| {
                                     Box::new(e) as Box<dyn std::error::Error + Send + Sync>
                                 })?;
                             }
                         }
-                        *state = AgentState::Ready;
+                        state.processing_state = ProcessingState::Ready;
                         Ok(())
                     }
                     Err(_e) => Err(Box::new(std::io::Error::new(
@@ -143,9 +165,20 @@ impl Actor for AgentActor {
             }
 
             (RouterCommand::ShutdownAgent { agent_id }, _) if agent_id == self.agent_id => {
-                *state = AgentState::Off;
+                state.processing_state = ProcessingState::Off;
                 Ok(())
             }
+
+            (RouterCommand::SubscribeAgent { topic, .. }, _) => {
+                state.add_topic(topic);
+                Ok(())
+            }
+
+            (RouterCommand::UnsubscribeAgent { topic, .. }, _) => {
+                state.remove_topic(&topic);
+                Ok(())
+            }
+
             _ => Ok(()),
         }
     }
