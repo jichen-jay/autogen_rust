@@ -5,6 +5,7 @@ use crate::utils::*;
 use crate::STORE;
 use crate::{FormatterFn, LlmConfig, TOGETHER_CONFIG};
 use anyhow::Result;
+use async_openai::types::CompletionUsage;
 use async_openai::types::Role;
 use lazy_static::lazy_static;
 use log::debug;
@@ -80,7 +81,8 @@ impl LlmAgent {
         let (system_prompt, tool_names) = match tools_map_meta.as_ref() {
             Some(tools_meta) => {
                 let formatter = TEMPLATE_SYSTEM_PROMPT_TOOL_USE.lock().unwrap();
-                let formatted_prompt = formatter(&[&system_prompt, tools_meta.as_str().unwrap_or("")]);
+                let formatted_prompt =
+                    formatter(&[&system_prompt, tools_meta.as_str().unwrap_or("")]);
 
                 let names = match tools_meta.as_array() {
                     Some(tools_array) => tools_array
@@ -147,11 +149,64 @@ impl LlmAgent {
                 let max_token = 1000u16;
                 let config = self.llm_config.as_ref().unwrap_or(&TOGETHER_CONFIG);
 
-                let llama_response =
-                    chat_inner_async_wrapper(config, &self.system_prompt, &user_prompt, max_token)
-                        .await?;
+                let mut llama_response = String::new();
+                let mut usage = CompletionUsage {
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    total_tokens: 0,
+                };
 
-                Ok(AgentResponse::Llama(llama_response))
+                match chat_inner_async_wrapper(config, &self.system_prompt, &user_prompt, max_token)
+                    .await
+                {
+                    Ok(res) => match res.content {
+                        Content::Text(tex) => {
+                            llama_response = tex;
+                        }
+
+                        // Content::ToolCall(tc) => {
+                        //     let func_name = tc.name.clone();
+                        //     let args = tc.arguments;
+
+                        //     let binding = STORE.lock().unwrap();
+                        // }
+                        Content::ToolCallJson(tcj) => {
+                            usage = res.usage;
+                            let func_name = tcj.name.clone();
+                            let args = tcj.arguments.unwrap_or(serde_json::json!({}));
+
+                            let binding = STORE.lock().unwrap();
+                            if let Some(tool) = binding.get(&func_name) {
+                                match tool.run(args) {
+                                    Ok(tool_output) => {
+                                        llama_response = tool_output;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Error executing tool {}: {}", func_name, e);
+                                        llama_response =
+                                            format!("Error executing tool {}: {}", func_name, e);
+                                    }
+                                }
+                            } else {
+                                eprintln!("Tool {} not found in STORE", func_name);
+                                llama_response = format!("Tool {} not found", func_name);
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        // If the chat call fails, log the error and update the response.
+                        eprintln!("Error in chat_inner_async_wrapper: {}", e);
+                        llama_response =
+                            "Failed to get a response from the chat system".to_string();
+                    }
+                };
+
+                let wrapped_response = LlamaResponseMessage {
+                    content: Content::Text(llama_response),
+                    role: Role::Assistant,
+                    usage: usage,
+                };
+                Ok(AgentResponse::Llama(wrapped_response))
             }
         }
     }

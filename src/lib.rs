@@ -104,9 +104,7 @@ fn get_user_feedback() -> MyResult<String> {
             let mut reader = BufReader::new(stdin());
 
             match timeout(Duration::from_secs(10), async {
-                reader
-                    .read_line(&mut input)
-                    .expect("Failed to read line");
+                reader.read_line(&mut input).expect("Failed to read line");
                 input
             })
             .await
@@ -160,13 +158,7 @@ fn get_current_weather(location: String, unit: String) -> MyResult<String> {
 
 pub const GET_USER_FEEDBACK_TOOL_DEF_OBJ: &str = r#"
 {
-    "name": "get_user_feedback",
-    "description": "Gets user input from stdin with timeout and special command handling",
-    "parameters": {
-        "type": "object",
-        "properties": {},
-        "required": []
-    }
+    "name": "get_user_feedback"
 }
 "#;
 

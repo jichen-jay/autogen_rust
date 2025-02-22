@@ -21,6 +21,7 @@ use tokio::time;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv::dotenv().ok();
@@ -32,9 +33,17 @@ async fn main() -> Result<()> {
 
     router_ref.cast(RouterCommand::Ready)?;
 
+    // let task_agent_id = spawn_agent(
+    //     router_ref.clone(),
+    //     "You're an AI assistant".to_string(),
+    //     TopicId::from("chat"),
+    //     None,
+    // )
+    // .await?;
+
     let task_agent_id = spawn_agent(
         router_ref.clone(),
-        "You're an AI assistant".to_string(),
+        "get_current_weather".to_string(),
         TopicId::from("chat"),
         None,
     )
@@ -50,6 +59,14 @@ async fn main() -> Result<()> {
         Some(serde_json::json!([{"name": "get_user_feedback"}])),
     )
     .await?;
+
+    // let user_proxy_agent_id = spawn_agent(
+    //     router_ref.clone(),
+    //     "You're a user proxy agent, sending tasks".to_string(),
+    //     TopicId::from("chat"),
+    //     Some(serde_json::json!([{"name": "get_user_feedback"}])),
+    // )
+    // .await?;
 
     println!("User Proxy agent id: {}", user_proxy_agent_id);
 

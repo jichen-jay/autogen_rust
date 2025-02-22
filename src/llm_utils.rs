@@ -92,6 +92,13 @@ pub async fn chat_inner_async_wrapper(
             println!("coding response_body: {:?}", response_body.clone());
 
             let raw_output = serde_json::from_str::<CreateChatCompletionResponse>(&response_body)?;
+            //there is a challenge, the method below tries to find if the raw_output is structured
+            //if yes, raw_output will be converted to ToolCall, else, to plain text;
+            //in the ToolCall case, due to current design limitation, some inner data could lose their positional information
+            //but positional information is needed for downstream task
+            //so when we know that the raw_output can be converted to ToolCall structure, we process the raw_output with 
+            //another logical that'll preserve the positional info;
+            //I'll give you relevant code so that you adapt current code block or the relevant code block to my logic work
             if let Some(out) = output_llama_response(raw_output) {
                 Ok(out)
             } else {
