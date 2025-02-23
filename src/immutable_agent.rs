@@ -151,9 +151,7 @@ impl LlmAgent {
                     .get("get_user_feedback")
                     .expect("get_user_feedback not found in store");
 
-                let output = tool
-                    .run(serde_json::json!({}))
-                    .expect("tool execution failed");
+                let output = tool.run(String::new()).expect("tool execution failed");
 
                 Ok(AgentResponse::Proxy(output))
             }
@@ -188,16 +186,7 @@ impl LlmAgent {
                             usage = res.usage;
                             let func_name = tcs.name.clone();
 
-                            let args_value = match tcs.arguments {
-                                Some(args_str) => match serde_json::from_str(&args_str) {
-                                    Ok(value) => value,
-                                    Err(e) => {
-                                        eprintln!("Error parsing arguments JSON: {}", e);
-                                        serde_json::Value::Null
-                                    }
-                                },
-                                None => serde_json::Value::Null,
-                            };
+                            let args_value = tcs.arguments.unwrap_or(String::new());
 
                             let binding = STORE.lock().unwrap();
                             if let Some(tool) = binding.get(&func_name) {
