@@ -20,7 +20,15 @@ use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
 lazy_static! {
+    static ref END_STR: &'static str = r#"</tools> Use the following pydantic model json schema for each tool call you will make: {"properties": {"arguments": {"title": "Arguments", "type": "object"}, "name": {"title": "Name", "type": "string"}}, "required": ["arguments", "name"], "title": "FunctionCall", "type": "object"} For each function call return a json object with function name and arguments within <tool_call></tool_call> XML tags as follows:
+<tool_call>
+{"arguments": <args-dict>, "name": <function-name>}
+</tool_call>"#;
     pub static ref TEMPLATE_SYSTEM_PROMPT_TOOL_USE: Arc<Mutex<FormatterFn>> =
+        Arc::new(Mutex::new(Box::new(|args: &[&str]| {
+            format!("{}{}{}", args[0], args[1], *END_STR)
+        })));
+    pub static ref TEMPLATE_tool_call: Arc<Mutex<FormatterFn>> =
         Arc::new(Mutex::new(Box::new(|args: &[&str]| {
             format!(
                 "You're a tool use agent, here are tools avaiable to you: {}",
@@ -81,15 +89,23 @@ impl LlmAgent {
         let (system_prompt, tool_names) = match tools_map_meta.as_ref() {
             Some(tools_meta) => {
                 let formatter = TEMPLATE_SYSTEM_PROMPT_TOOL_USE.lock().unwrap();
-                let formatted_prompt =
-                    formatter(&[&system_prompt, tools_meta.as_str().unwrap_or("")]);
+                let meta_str = tools_meta
+                    .as_str()
+                    .map(|s| s.to_owned())
+                    .unwrap_or_else(|| tools_meta.to_string());
+                let formatted_prompt = formatter(&[&system_prompt, &meta_str]);
 
                 let names = match tools_meta.as_array() {
                     Some(tools_array) => tools_array
                         .iter()
                         .filter_map(|tool| {
                             tool.get("name")
-                                .and_then(|name| name.as_str())
+                                .and_then(|n| n.as_str())
+                                .or_else(|| {
+                                    tool.get("function")
+                                        .and_then(|f| f.get("name"))
+                                        .and_then(|n| n.as_str())
+                                })
                                 .map(String::from)
                         })
                         .collect::<Vec<String>>(),
@@ -114,6 +130,7 @@ impl LlmAgent {
         println!("default_method: received input: {:?}", input);
 
         let tool_names = self.tool_names.clone();
+        println!("length of tool_names: {:?}", tool_names.len());
 
         match tool_names.len() {
             0 => {
@@ -161,24 +178,33 @@ impl LlmAgent {
                 {
                     Ok(res) => match res.content {
                         Content::Text(tex) => {
+                            println!("I'm inside the chat Text branch");
                             llama_response = tex;
                         }
+                        //expect program to enter here, it didn't, it entered
+                        Content::ToolCallStr(tcs) => {
+                            println!("I'm inside the chat ToolCallStr branch");
 
-                        // Content::ToolCall(tc) => {
-                        //     let func_name = tc.name.clone();
-                        //     let args = tc.arguments;
-
-                        //     let binding = STORE.lock().unwrap();
-                        // }
-                        Content::ToolCallJson(tcj) => {
                             usage = res.usage;
-                            let func_name = tcj.name.clone();
-                            let args = tcj.arguments.unwrap_or(serde_json::json!({}));
+                            let func_name = tcs.name.clone();
+
+                            let args_value = match tcs.arguments {
+                                Some(args_str) => match serde_json::from_str(&args_str) {
+                                    Ok(value) => value,
+                                    Err(e) => {
+                                        eprintln!("Error parsing arguments JSON: {}", e);
+                                        serde_json::Value::Null
+                                    }
+                                },
+                                None => serde_json::Value::Null,
+                            };
 
                             let binding = STORE.lock().unwrap();
                             if let Some(tool) = binding.get(&func_name) {
-                                match tool.run(args) {
+                                match tool.run(args_value) {
                                     Ok(tool_output) => {
+                                        println!("function_call result: {}", tool_output.clone());
+
                                         llama_response = tool_output;
                                     }
                                     Err(e) => {
@@ -194,7 +220,6 @@ impl LlmAgent {
                         }
                     },
                     Err(e) => {
-                        // If the chat call fails, log the error and update the response.
                         eprintln!("Error in chat_inner_async_wrapper: {}", e);
                         llama_response =
                             "Failed to get a response from the chat system".to_string();

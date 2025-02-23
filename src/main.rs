@@ -13,14 +13,13 @@ use autogen_rust::llm_utils::*;
 use autogen_rust::{immutable_agent::*, llama_structs::Content};
 use env_logger;
 use ractor::{call_t, rpc::CallResult, spawn_named, Actor, ActorCell, ActorRef, RpcReplyPort};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::time::Duration;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
-
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -43,22 +42,76 @@ async fn main() -> Result<()> {
 
     let task_agent_id = spawn_agent(
         router_ref.clone(),
-        "get_current_weather".to_string(),
+        "<|im_start|>system You are a function calling AI model. You are provided with function signatures within <tools></tools> XML tags. You may call one or more functions to assist with the user query. Don't make assumptions about what values to plug into functions. Here are the available tools: <tools>".to_string(),
         TopicId::from("chat"),
-        None,
+        Some(json!([{
+            "type": "function",
+            "function": {
+            "name": "get_current_weather",
+            "description": "Get the current weather in a given location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "The city and state, e.g. San Francisco, CA"
+                    },
+                    "unit": {
+                        "type": "string",
+                        "enum": ["celsius", "fahrenheit"],
+                        "description": "The temperature unit to use. Infer this from the users location."
+                    }
+                },
+                "required": ["location", "unit"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+    "name": "process_values",
+    "description": "Processes up to 5 different types of values",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "a": {
+                "type": "i32",
+                "description": "An integer value"
+            },
+            "b": {
+                "type": "f32",
+                "description": "A floating-point value"
+            },
+            "c": {
+                "type": "bool",
+                "description": "A boolean value"
+            },
+            "d": {
+                "type": "string",
+                "description": "A string value"
+            },
+            "e": {
+                "type": "i32",
+                "description": "Another integer value"
+            }
+        },
+        "required": ["a", "b", "c", "d", "e"]
+    }
+}
+}])),
     )
     .await?;
     println!("Task agent id: {}", task_agent_id);
 
     time::sleep(std::time::Duration::from_secs(1)).await;
-
-    let user_proxy_agent_id = spawn_agent(
-        router_ref.clone(),
-        "You're a user proxy agent, sending tasks".to_string(),
-        TopicId::from("chat"),
-        Some(serde_json::json!([{"name": "get_user_feedback"}])),
-    )
-    .await?;
+    let temp_agent_id = Uuid::new_v4();
+    // let user_proxy_agent_id = spawn_agent(
+    //     router_ref.clone(),
+    //     "get_user_feedback".to_string(),
+    //     TopicId::from("chat"),
+    //     None,
+    // )
+    // .await?;
 
     // let user_proxy_agent_id = spawn_agent(
     //     router_ref.clone(),
@@ -68,18 +121,20 @@ async fn main() -> Result<()> {
     // )
     // .await?;
 
-    println!("User Proxy agent id: {}", user_proxy_agent_id);
+    // println!("User Proxy agent id: {}", user_proxy_agent_id);
 
     time::sleep(std::time::Duration::from_secs(1)).await;
 
     let task_message = Message::new(
-        Content::Text("calculate 1 + 2".to_string()),
+        Content::Text(
+            "<|im_start|>user Fetch the weather of New York in Celsius unit<|im_end|>".to_string(),
+        ),
         None,
         Role::User,
     );
 
     let task_context = ActorContext::new()
-        .with_sender(user_proxy_agent_id)
+        .with_sender(temp_agent_id)
         .with_topic("chat".to_string());
     router_ref.cast(RouterCommand::RouteMessage {
         topic: "chat".to_string(),
@@ -87,18 +142,18 @@ async fn main() -> Result<()> {
         context: task_context,
     })?;
 
-    time::sleep(std::time::Duration::from_secs(3)).await;
+    // time::sleep(std::time::Duration::from_secs(3)).await;
 
-    println!("Notifying UserProxy agent to initiate shutdown (its default_method will read terminal input).");
+    // println!("Notifying UserProxy agent to initiate shutdown (its default_method will read terminal input).");
 
     time::sleep(Duration::from_secs(5)).await;
 
     router_ref.cast(RouterCommand::ShutdownAgent {
         agent_id: task_agent_id,
     })?;
-    router_ref.cast(RouterCommand::ShutdownAgent {
-        agent_id: user_proxy_agent_id,
-    })?;
+    // router_ref.cast(RouterCommand::ShutdownAgent {
+    //     agent_id: user_proxy_agent_id,
+    // })?;
     router_ref.cast(RouterCommand::Off)?;
 
     time::sleep(Duration::from_secs(1)).await;

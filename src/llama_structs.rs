@@ -1,34 +1,27 @@
+use anyhow::{anyhow, Result};
 use async_openai::types::{CompletionUsage, CreateChatCompletionResponse, Role};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::HashMap; // Added anyhow import
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-pub struct ToolCall {
+pub struct ToolCallStr {
     pub name: String,
-    pub arguments: Option<HashMap<String, String>>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-pub struct ToolCallJson {
-    pub name: String,
-    pub arguments: Option<Value>,
+    pub arguments: Option<String>,
 }
 
 #[allow(non_snake_case)]
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub enum Content {
     Text(String),
-    // ToolCall(ToolCall),
-    ToolCallJson(ToolCallJson),
+    ToolCallStr(ToolCallStr),
 }
 
 impl Content {
     pub fn content_to_string(&self) -> String {
         match self {
             Content::Text(tex) => tex.to_string(),
-            // Content::ToolCall(tc) => format!("{:?}", tc),
-            Content::ToolCallJson(tcj) => format!("{:?}", tcj),
+            Content::ToolCallStr(tcs) => format!("{:?}", tcs),
         }
     }
 
@@ -48,121 +41,73 @@ impl LlamaResponseMessage {
     pub fn content_to_string(&self) -> String {
         match &self.content {
             Content::Text(text) => text.clone(),
-            // Content::ToolCall(tool_call) => format!(
-            //     "tool_call: {}, arguments: {}",
-            //     tool_call.name,
-            //     tool_call
-            //         .arguments
-            //         .as_ref()
-            //         .unwrap()
-            //         .into_iter()
-            //         .map(|(arg, val)| format!("{:?}: {:?}", arg, val))
-            //         .collect::<Vec<String>>()
-            //         .join(", ")
-            // ),
-            Content::ToolCallJson(tool_call_json) => format!(
-                "tool_call: {}, arguments: {:?}",
-                tool_call_json.name, tool_call_json.arguments
-            ),
+            Content::ToolCallStr(tcs) => {
+                format!("tool_call: {}, arguments: {:?}", tcs.name, tcs.arguments)
+            }
         }
     }
 }
 
-fn extract_json_from_xml_like(xml_like_data: &str) -> Option<String> {
+fn extract_json_from_xml_like(xml_like_data: &str) -> Result<String> {
     let start_tag = "<tool_call>";
     let end_tag = "</tool_call>";
 
     if xml_like_data.trim().starts_with(start_tag) && xml_like_data.trim().ends_with(end_tag) {
         let start_pos = start_tag.len();
         let end_pos = xml_like_data.len() - end_tag.len();
-        Some(xml_like_data[start_pos..end_pos].trim().to_string())
+        Ok(xml_like_data[start_pos..end_pos].trim().to_string())
     } else {
-        None
+        Err(anyhow!("Failed to parse tool_call")) // Fixed error macro
     }
 }
 
 pub fn output_llama_response(
     res_obj: CreateChatCompletionResponse,
-) -> Option<LlamaResponseMessage> {
-    let usage = res_obj.clone().usage.unwrap();
-    let msg_obj = res_obj.clone().choices[0].message.clone();
-    let role = msg_obj.clone().role;
-    if let Some(data) = msg_obj.content {
-        if let Some(json_str) = extract_json_from_xml_like(&data) {
-            println!("{:?}", json_str.clone());
-            let (name, args) = extract_tool_call_json(&json_str);
-            return Some(LlamaResponseMessage {
-                content: Content::ToolCallJson(ToolCallJson {
-                    name: name,
-                    arguments: args,
-                }),
-                role: role,
-                usage: usage,
-            });
-        } else {
-            return Some(LlamaResponseMessage {
-                content: Content::Text(data.to_owned()),
-                role: role,
-                usage: usage,
-            });
-        }
-    } else {
-        return Some(LlamaResponseMessage {
-            content: Content::Text("empty result from LlamaResponse".to_string()),
-            role: role,
-            usage: usage,
-        });
+) -> Result<LlamaResponseMessage> {
+    let usage = res_obj.usage.ok_or_else(|| anyhow!("Missing usage"))?;
+    let msg_obj = &res_obj.choices[0].message;
+    let role = msg_obj.role.clone();
+    let data = msg_obj
+        .content
+        .as_ref()
+        .ok_or_else(|| anyhow!("Missing content"))?;
+    let json_str = extract_json_from_xml_like(data)?;
+
+    println!("tool_call original string\n: {:?}\n\n", json_str);
+    match extract_tool_call_json(&json_str) {
+        Ok((name, arguments)) => Ok(LlamaResponseMessage {
+            content: Content::ToolCallStr(ToolCallStr { name, arguments }),
+            role,
+            usage,
+        }),
+        Err(_) => Ok(LlamaResponseMessage {
+            content: Content::Text(data.to_string()),
+            role,
+            usage,
+        }),
     }
 }
 
-fn extract_tool_call(input: &str) -> Option<ToolCall> {
+fn extract_tool_call_json(input: &str) -> Result<(String, Option<String>)> {
     let re = regex::Regex::new(
         r#"\{"arguments":\s*(?P<arguments>\{.*?\}),\s*"name":\s*"(?P<name>.*?)"\}"#,
-    )
-    .unwrap();
+    )?;
 
-    if let Some(caps) = re.captures(input) {
-        let arguments_str = caps.name("arguments")?.as_str();
-        let name = caps.name("name")?.as_str().to_string();
+    let caps = re
+        .captures(input)
+        .ok_or_else(|| anyhow!("No captures found"))?;
+    let arguments_str = caps
+        .name("arguments")
+        .ok_or_else(|| anyhow!("No arguments found"))?
+        .as_str();
+    let name = caps
+        .name("name")
+        .ok_or_else(|| anyhow!("No name found"))?
+        .as_str()
+        .to_string();
 
-        if let Ok(arguments_value) = serde_json::from_str::<Value>(arguments_str) {
-            let arguments_map = match arguments_value {
-                Value::Object(map) => map
-                    .into_iter()
-                    .filter_map(|(k, v)| v.as_str().map(|v| (k, v.to_string())))
-                    .collect(),
-                _ => HashMap::new(),
-            };
-
-            return Some(ToolCall {
-                arguments: Some(arguments_map),
-                name,
-            });
-        }
-    }
-
-    None
-}
-
-fn extract_tool_call_json(input: &str) -> (String, Option<Value>) {
-    let re = regex::Regex::new(
-        r#"\{"arguments":\s*(?P<arguments>\{.*?\}),\s*"name":\s*"(?P<name>.*?)"\}"#,
-    )
-    .unwrap();
-
-    if let Some(caps) = re.captures(input) {
-        let arguments_str = caps.name("arguments")?.as_str();
-        let name = caps.name("name")?.as_str().to_string();
-
-        if let Ok(arguments_value) = serde_json::from_str::<Value>(arguments_str) {
-            let arguments_map = match arguments_value {
-                Value::Object(map) => (name.clone(), Some(map)),
-                _ => (name.clone(), None),
-            };
-        } else {
-            (name, None)
-        }
-    } else {
-        ("function name not found".to_string(), None)
+    match serde_json::from_str::<Value>(arguments_str) {
+        Ok(_) => Ok((name, Some(arguments_str.to_string()))),
+        Err(_) => Ok((name, None)),
     }
 }

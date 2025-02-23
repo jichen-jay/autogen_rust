@@ -25,8 +25,15 @@ pub struct LlmConfig {
     pub api_key_str: &'static str,
 }
 
+// pub const DEEPINFRA_CONFIG: LlmConfig = LlmConfig {
+//     model: "NousResearch/Hermes-3-Llama-3.1-405B",
+//     context_size: 8192,
+//     base_url: "https://api.deepinfra.com/v1/openai/chat/completions",
+//     api_key_str: "DEEPINFRA_API_KEY",
+// };
+
 pub const TOGETHER_CONFIG: LlmConfig = LlmConfig {
-    model: "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
+    model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
     context_size: 8192,
     base_url: "https://api.together.xyz/v1/chat/completions",
     api_key_str: "TOGETHER_API_KEY",
@@ -150,7 +157,7 @@ fn process_values(a: i32, b: f32, c: bool, d: String, e: i32) -> MyResult<String
 #[create_tool_with_function(GET_WEATHER_TOOL_DEF_OBJ)]
 fn get_current_weather(location: String, unit: String) -> MyResult<String> {
     if location.contains("New") {
-        Ok(format!("Weather for {} in {}", location, unit))
+        Ok(format!("Weather for {} in 25 {} ", location, unit))
     } else {
         Err(format!("Weather for {} in {}", location, unit).into())
     }
