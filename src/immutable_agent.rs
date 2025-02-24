@@ -179,14 +179,13 @@ impl LlmAgent {
                             println!("I'm inside the chat Text branch");
                             llama_response = tex;
                         }
-                        //expect program to enter here, it didn't, it entered
-                        Content::ToolCallStr(tcs) => {
-                            println!("I'm inside the chat ToolCallStr branch");
+                        Content::JsonStr(JsonStr::ToolCall(tc)) => {
+                            println!("I'm inside the chat JsonStr branch");
 
                             usage = res.usage;
-                            let func_name = tcs.name.clone();
+                            let func_name = tc.name.clone();
 
-                            let args_value = tcs.arguments.unwrap_or(String::new());
+                            let args_value = tc.arguments.unwrap_or(String::new());
 
                             let binding = STORE.lock().unwrap();
                             if let Some(tool) = binding.get(&func_name) {
@@ -206,6 +205,13 @@ impl LlmAgent {
                                 eprintln!("Tool {} not found in STORE", func_name);
                                 llama_response = format!("Tool {} not found", func_name);
                             }
+                        }
+                        Content::JsonStr(JsonStr::JsonLoad(jl)) => {
+                            println!("I'm inside the chat JsonStr branch");
+
+                            usage = res.usage;
+
+                            todo!()
                         }
                     },
                     Err(e) => {

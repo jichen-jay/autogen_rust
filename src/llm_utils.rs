@@ -88,7 +88,11 @@ pub async fn chat_inner_async_wrapper(
     match client.post(uri).body(body.clone()).send().await {
         Ok(chat) => {
             let response_body = chat.text().await?;
-            println!("raw response_body: {:?}", response_body.clone());
+            let pretty_json = jsonxf::pretty_print(&response_body)
+                .expect("convert to json failed before pretty print LLM response");
+            println!("raw response_body: {}", pretty_json);
+
+            // println!("{:?}", response_body.clone());
 
             let raw_output = serde_json::from_str::<CreateChatCompletionResponse>(&response_body)?;
             output_llama_response(raw_output)
