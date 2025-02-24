@@ -35,7 +35,9 @@ pub struct LlmConfig {
 // };
 
 pub const TOGETHER_CONFIG: LlmConfig = LlmConfig {
-    model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    model: "google/gemma-2-9b-it",
+    // model: "mistralai/Mistral-Small-24B-Instruct-2501",
+    // model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
     context_size: 8192,
     base_url: "https://api.together.xyz/v1/chat/completions",
     api_key_str: "TOGETHER_API_KEY",

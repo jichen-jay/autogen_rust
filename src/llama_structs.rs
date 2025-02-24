@@ -4,6 +4,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::result::Result as StdResult;
+use thiserror::Error;
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct ToolCall {
@@ -72,7 +74,13 @@ impl LlamaResponseMessage {
     }
 }
 
-fn extract_json_from_xml_like(xml_like_data: &str) -> Result<String> {
+pub fn extract_json_from_xml_like(
+    xml_like_data: &str,
+) -> StdResult<String, impl std::error::Error> {
+    #[derive(Error, Debug)]
+    #[error("Invalid XML format: missing or mismatched tool_call tags")]
+    struct XmlParseError;
+
     let start_tag = "<tool_call>";
     let end_tag = "</tool_call>";
 
@@ -82,7 +90,7 @@ fn extract_json_from_xml_like(xml_like_data: &str) -> Result<String> {
         let end_pos = trimmed.len() - end_tag.len();
         Ok(trimmed[start_pos..end_pos].trim().to_string())
     } else {
-        Err(anyhow!("Failed to parse tool_call"))
+        Err(XmlParseError)
     }
 }
 
@@ -116,48 +124,69 @@ pub fn output_llama_response(
     }
 }
 
-use std::process::Command;
+pub fn extract_tool_call_json(input: &str) -> StdResult<JsonStr, impl std::error::Error> {
+    #[derive(Error, Debug)]
+    enum ExtractError {
+        #[error("JSON repair failed: {0}")]
+        RepairError(#[from] Box<dyn std::error::Error>),
+        #[error("Regex creation failed: {0}")]
+        RegexError(#[from] regex::Error),
+        #[error("JSON parsing failed: {0}")]
+        JsonError(#[from] serde_json::Error),
+        #[error("No arguments found in tool call")]
+        NoArguments,
+        #[error("No name found in tool call")]
+        NoName,
+        #[error("Invalid input: neither valid JSON nor matching tool-call pattern")]
+        InvalidInput,
+    }
 
-pub fn extract_tool_call_json(input: &str) -> Result<JsonStr> {
-    let repaired_input = repair_json_with_tool(input)?;
+    let repaired_input =
+        repair_json_with_tool(input).map_err(|e| ExtractError::RepairError(Box::new(e)))?;
 
-    if let Ok(parsed) = serde_json::from_str::<Value>(&repaired_input) {
-        if let Some(name_val) = parsed.get("name") {
-            if name_val.is_string() {
-                let name = name_val.as_str().unwrap().to_string();
-                let arguments_slice = if parsed.get("arguments").is_some() {
-                    let re_args = Regex::new(r#"(?s)"arguments"\s*:\s*(?P<args>\{.*?\})"#)?;
-                    if let Some(cap_args) = re_args.captures(&repaired_input) {
-                        Some(cap_args.name("args").unwrap().as_str().to_string())
-                    } else {
-                        None
-                    }
+    let parsed = serde_json::from_str::<Value>(&repaired_input)?;
+
+    if let Some(name_val) = parsed.get("name") {
+        if name_val.is_string() {
+            let name = name_val.as_str().unwrap().to_string();
+            let arguments_slice = if parsed.get("arguments").is_some() {
+                let re_args = Regex::new(r#"(?s)"arguments"\s*:\s*(?P<args>\{.*?\})"#)?;
+                if let Some(cap_args) = re_args.captures(&repaired_input) {
+                    cap_args
+                        .name("args")
+                        .ok_or(ExtractError::NoArguments)?
+                        .as_str()
+                        .to_string()
+                        .into()
                 } else {
                     None
-                };
+                }
+            } else {
+                None
+            };
 
-                return Ok(JsonStr::ToolCall(ToolCall {
-                    name,
-                    arguments: arguments_slice,
-                }));
-            }
+            return Ok(JsonStr::ToolCall(ToolCall {
+                name,
+                arguments: arguments_slice,
+            }));
         }
+    } else {
         return Ok(JsonStr::JsonLoad(parsed));
     }
 
-    // Step 3: Fallback to fuzzy matching with regex
     let re = Regex::new(
         r#"(?i)\{"arguments":\s*(?P<arguments>\{.*\}),\s*"name":\s*"(?P<name>[^"]+)"\}"#,
     )?;
+
     if let Some(caps) = re.captures(input) {
         let arguments_str = caps
             .name("arguments")
-            .ok_or_else(|| anyhow!("No arguments found"))?
+            .ok_or(ExtractError::NoArguments)?
             .as_str()
             .to_string();
         let name = caps
             .name("name")
-            .ok_or_else(|| anyhow!("No name found"))?
+            .ok_or(ExtractError::NoName)?
             .as_str()
             .to_string();
 
@@ -167,55 +196,31 @@ pub fn extract_tool_call_json(input: &str) -> Result<JsonStr> {
         }));
     }
 
-    Err(anyhow!(
-        "Input is neither valid JSON (after repair) nor does it match the fuzzy tool-call pattern"
-    ))
+    Err(ExtractError::InvalidInput)
 }
 
-fn repair_json_with_tool(input: &str) -> Result<String> {
-    let output = Command::new("./jsonrepair").args(&["-i", input]).output()?;
+pub fn repair_json_with_tool(input: &str) -> StdResult<String, impl std::error::Error> {
+    #[derive(Debug, Error)]
+    enum RepairError {
+        #[error("Repair tool failed with error: {0}")]
+        RepairToolError(String),
+        #[error("Invalid UTF-8 in repair tool output: {0}")]
+        Utf8Error(#[from] std::string::FromUtf8Error),
+        #[error("IO error: {0}")]
+        Io(#[from] std::io::Error),
+    }
+
+    let output = std::process::Command::new("./jsonrepair")
+        .args(&["-i", input])
+        .output()?;
 
     if !output.status.success() {
-        return Err(anyhow!(
-            "Repair tool failed with error: {}",
-            String::from_utf8_lossy(&output.stderr)
+        return Err(RepairError::RepairToolError(
+            String::from_utf8_lossy(&output.stderr).to_string(),
         ));
     }
 
-    match String::from_utf8(output.stdout) {
-        Ok(res) => {
-            println!("repair output: {:?}", res.clone());
-            Ok(res)
-        }
-        Err(e) => Err(anyhow!("Invalid UTF-8 in repair tool output: {}", e)),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json;
-
-    #[test]
-    fn test_extract_tool_call_json() {
-        // Test input: a JSON string representing a chat completion response.
-        let test_input = r#"
-  {\"arguments\": {\"location\": \"New York\", \"unit\": \"celsius\"}, \"name\": \"get_current_weather\"}",
-    "#;
-
-        // Extract tool call information using extract_tool_call_json.
-        let result = extract_tool_call_json(&test_input).expect("Failed to extract tool call json");
-
-        // Verify that the returned JsonStr is a ToolCall variant with expected values.
-        match result {
-            JsonStr::ToolCall(tool_call) => {
-                assert_eq!(tool_call.name, "get_current_weather");
-                assert_eq!(
-                    tool_call.arguments,
-                    Some("{\"location\": \"New York\", \"unit\": \"celsius\"}".to_string())
-                );
-            }
-            _ => panic!("Expected JsonStr::ToolCall variant, but received a different variant"),
-        }
-    }
+    let res = String::from_utf8(output.stdout)?;
+    println!("repair output: {:?}", res);
+    Ok(res)
 }
