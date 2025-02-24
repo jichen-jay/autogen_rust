@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use async_openai::types::{CompletionUsage, CreateChatCompletionResponse, Role};
+use log;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -94,38 +95,74 @@ pub fn extract_json_from_xml_like(
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum LlamaResponseError {
+    #[error("No choices available in response")]
+    NoChoices,
+    #[error("Message content missing in choice")]
+    MissingMessageContent,
+    #[error("Usage data missing in response")]
+    MissingUsageData,
+    #[error("Role information missing")]
+    MissingRole,
+    #[error("JSON extraction from XML failed: {0}")]
+    JsonExtractionError(String),
+    #[error("JSON pretty print formatting failed: {0}")]
+    JsonFormatError(String),
+    #[error("Tool call parsing error: {0}")]
+    ToolCallParseError(String),
+}
+
 pub fn output_llama_response(
     res_obj: CreateChatCompletionResponse,
-) -> Result<LlamaResponseMessage> {
-    let usage = res_obj.usage.ok_or_else(|| anyhow!("Missing usage"))?;
-    let msg_obj = &res_obj.choices[0].message;
+) -> StdResult<LlamaResponseMessage, Box<dyn std::error::Error>> {
+    let usage = res_obj.usage.ok_or_else(|| {
+        Box::new(LlamaResponseError::MissingUsageData) as Box<dyn std::error::Error>
+    })?;
+    let choice = res_obj
+        .choices
+        .first()
+        .ok_or_else(|| Box::new(LlamaResponseError::NoChoices) as Box<dyn std::error::Error>)?;
+    let msg_obj = &choice.message;
+
     let role = msg_obj.role.clone();
-    let data = msg_obj
-        .content
-        .as_ref()
-        .ok_or_else(|| anyhow!("Missing content"))?;
+    let data = msg_obj.content.as_ref().ok_or_else(|| {
+        Box::new(LlamaResponseError::MissingMessageContent) as Box<dyn std::error::Error>
+    })?;
 
-    let json_str = extract_json_from_xml_like(data)?;
-
-    let pretty_json = jsonxf::pretty_print(&json_str).expect("failed to convert for pretty print");
-    println!("Json Output original string:\n {}\n", pretty_json);
+    let json_str = extract_json_from_xml_like(data).map_err(|e| {
+        Box::new(LlamaResponseError::JsonExtractionError(e.to_string()))
+            as Box<dyn std::error::Error>
+    })?;
+    let pretty_json = jsonxf::pretty_print(&json_str).map_err(|e| {
+        Box::new(LlamaResponseError::JsonFormatError(e.to_string())) as Box<dyn std::error::Error>
+    })?;
+    println!("Json Output original string:\n{}\n", pretty_json);
 
     match extract_tool_call_json(&json_str) {
-        Ok(json_data) => Ok(LlamaResponseMessage {
-            content: Content::JsonStr(json_data),
-            role,
-            usage,
-        }),
-        Err(_) => Ok(LlamaResponseMessage {
-            content: Content::Text(data.to_string()),
-            role,
-            usage,
-        }),
+        Ok(json_data) => {
+            Ok::<LlamaResponseMessage, Box<dyn std::error::Error>>(LlamaResponseMessage {
+                content: Content::JsonStr(json_data),
+                role,
+                usage,
+            })
+        }
+        Err(e) => {
+            log::warn!(
+                "Falling back to text content due to tool call parse error: {}",
+                e
+            );
+            Ok(LlamaResponseMessage {
+                content: Content::Text(data.to_string()),
+                role,
+                usage,
+            })
+        }
     }
 }
 
-pub fn extract_tool_call_json(input: &str) -> StdResult<JsonStr, impl std::error::Error> {
-    #[derive(Error, Debug)]
+pub fn extract_tool_call_json(input: &str) -> StdResult<JsonStr, Box<dyn std::error::Error>> {
+    #[derive(thiserror::Error, Debug)]
     enum ExtractError {
         #[error("JSON repair failed: {0}")]
         RepairError(#[from] Box<dyn std::error::Error>),
@@ -143,12 +180,12 @@ pub fn extract_tool_call_json(input: &str) -> StdResult<JsonStr, impl std::error
 
     let repaired_input =
         repair_json_with_tool(input).map_err(|e| ExtractError::RepairError(Box::new(e)))?;
-
-    let parsed = serde_json::from_str::<Value>(&repaired_input)?;
+    let parsed = serde_json::from_str::<serde_json::Value>(&repaired_input)?;
 
     if let Some(name_val) = parsed.get("name") {
         if name_val.is_string() {
             let name = name_val.as_str().unwrap().to_string();
+            // Optionally attempt to extract arguments from the tool call.
             let arguments_slice = if parsed.get("arguments").is_some() {
                 let re_args = Regex::new(r#"(?s)"arguments"\s*:\s*(?P<args>\{.*?\})"#)?;
                 if let Some(cap_args) = re_args.captures(&repaired_input) {
@@ -177,7 +214,6 @@ pub fn extract_tool_call_json(input: &str) -> StdResult<JsonStr, impl std::error
     let re = Regex::new(
         r#"(?i)\{"arguments":\s*(?P<arguments>\{.*\}),\s*"name":\s*"(?P<name>[^"]+)"\}"#,
     )?;
-
     if let Some(caps) = re.captures(input) {
         let arguments_str = caps
             .name("arguments")
@@ -189,14 +225,12 @@ pub fn extract_tool_call_json(input: &str) -> StdResult<JsonStr, impl std::error
             .ok_or(ExtractError::NoName)?
             .as_str()
             .to_string();
-
         return Ok(JsonStr::ToolCall(ToolCall {
             name,
             arguments: Some(arguments_str),
         }));
     }
-
-    Err(ExtractError::InvalidInput)
+    Err(ExtractError::InvalidInput.into())
 }
 
 pub fn repair_json_with_tool(input: &str) -> StdResult<String, impl std::error::Error> {
