@@ -9,6 +9,7 @@ use autogen_rust::agent_runtime::{
     ActorContext, AgentId, MessageContext, RouterCommand, SpawnAgentResponse, TopicId,
 };
 use autogen_rust::llama::*;
+use autogen_rust::FormatterWrapper;
 use autogen_rust::{immutable_agent::*, llama::Content};
 use env_logger;
 use ractor::{call_t, rpc::CallResult, spawn_named, Actor, ActorCell, ActorRef, RpcReplyPort};
@@ -42,6 +43,7 @@ async fn main() -> Result<()> {
     let task_agent_id = spawn_agent(
         router_ref.clone(),
         "<|im_start|>system You are a function calling AI model. You are provided with function signatures within <tools></tools> XML tags. You may call one or more functions to assist with the user query. Don't make assumptions about what values to plug into functions. Here are the available tools: <tools>".to_string(),
+      None,
         TopicId::from("chat"),
         Some(json!([{
             "type": "function",
@@ -97,7 +99,7 @@ async fn main() -> Result<()> {
         "required": ["a", "b", "c", "d", "e"]
     }
 }
-}])),
+}]))
     )
     .await?;
     println!("Task agent id: {}", task_agent_id);
@@ -163,6 +165,7 @@ async fn main() -> Result<()> {
 async fn spawn_agent(
     router_ref: ActorRef<RouterCommand>,
     system_prompt: String,
+    user_prompt_formatter: Option<FormatterWrapper>,
     topic: TopicId,
     tools_map_meta: Option<Value>,
 ) -> Result<AgentId> {
@@ -170,6 +173,7 @@ async fn spawn_agent(
         .call(
             |reply_to| RouterCommand::SpawnAgent {
                 system_prompt,
+                user_prompt_formatter,
                 topic,
                 tools_map_meta,
                 reply_to,

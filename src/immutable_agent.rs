@@ -1,6 +1,9 @@
 use crate::agent_runtime::{agent::AgentActor, AgentId, TopicId};
 use crate::llama::*;
-use crate::{FormatterFn, LlmConfig, STORE, TEMPLATE_SYSTEM_PROMPT_TOOL_USE, TOGETHER_CONFIG};
+use crate::{
+    FormatterFn, LlmConfig, STORE, TEMPLATE_SYSTEM_PROMPT_PLANNER, TEMPLATE_SYSTEM_PROMPT_TOOL_USE,
+    TEMPLATE_USER_PROMPT_TASK_JSON, TOGETHER_CONFIG,
+};
 use anyhow::Result;
 use async_openai::types::CompletionUsage;
 use async_openai::types::Role;
@@ -52,6 +55,7 @@ impl Message {
 #[derive(Clone)]
 pub struct LlmAgent {
     pub system_prompt: String,
+    pub user_prompt_formatter: Option<Arc<Mutex<FormatterFn>>>,
     pub llm_config: Option<LlmConfig>,
     pub tools_map_meta: Option<Value>,
     pub description: String,
@@ -68,8 +72,11 @@ pub enum BuilderError {
 }
 
 impl LlmAgent {
+    //am considering is add a user prompt formatter function in this method
+    //or should I keep the formatter function as a field of agent struct
     pub fn build(
         system_prompt: String,
+        user_prompt_formatter: Option<Arc<Mutex<FormatterFn>>>,
         llm_config: Option<LlmConfig>,
         tools_map_meta: Option<Value>,
         description: String,
@@ -113,6 +120,7 @@ impl LlmAgent {
 
         Ok(Self {
             system_prompt,
+            user_prompt_formatter,
             llm_config,
             description,
             tools_map_meta,
@@ -128,7 +136,16 @@ impl LlmAgent {
 
         match tool_names.len() {
             0 => {
-                let user_prompt = format!("Here is the task for you: {:?}", input);
+                let user_prompt = match &self.user_prompt_formatter {
+                    None => format!("here is your task: {}", input),
+
+                    Some(f) => {
+                        let formatter = f.lock().unwrap();
+
+                        formatter(&[&input])
+                    }
+                };
+
                 let max_token = 1000u16;
                 let llama_response = chat_inner_async_wrapper(
                     &TOGETHER_CONFIG,

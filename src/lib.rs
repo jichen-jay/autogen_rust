@@ -18,6 +18,11 @@ use std::sync::{Arc, Mutex};
 use tokio::time::{timeout, Duration};
 use tool_builder::create_tool_with_function;
 
+pub type FormatterWrapper = Arc<Mutex<FormatterFn>>;
+type FormatterFn = Box<dyn (Fn(&[&str]) -> String) + Send + Sync>;
+
+pub static STORE: Lazy<Mutex<HashMap<String, Tool>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
 lazy_static! {
     static ref END_STR: &'static str = r#"</tools> Use the following pydantic model json schema for each tool call you will make: {"properties": {"arguments": {"title": "Arguments", "type": "object"}, "name": {"title": "Name", "type": "string"}}, "required": ["arguments", "name"], "title": "FunctionCall", "type": "object"} For each function call return a json object with function name and arguments within <tool_call></tool_call> XML tags as follows:
 <tool_call>
@@ -27,10 +32,53 @@ lazy_static! {
         Arc::new(Mutex::new(Box::new(|args: &[&str]| {
             format!("{}{}{}", args[0], args[1], *END_STR)
         })));
-    pub static ref TEMPLATE_: Arc<Mutex<FormatterFn>> =
+    pub static ref TEMPLATE_SYSTEM_PROMPT_PLANNER: Arc<Mutex<FormatterFn>> = Arc::new(Mutex::new(
+        Box::new(|args: &[&str]| {
+            format!(
+        "You are a precise project planning assistant that breaks down projects into structured task lists.
+
+        Available tools: {}
+
+        PLANNING RULES:
+        - Break down tasks into one level of subtasks only (no nested subtasks)
+        - Map subtasks to available tool capabilities when possible
+        - Note that a single tool may require multiple subtasks to complete a goal
+        - Arrange subtasks in a logical sequence of execution
+        - Ensure each subtask is concrete and actionable
+
+        RESPONSE BEHAVIOR:
+        - Analyze projects to identify logical components
+        - Create structured, sequential task breakdowns
+        - Always return valid JSON in the exact format requested
+        - Focus on practical, implementable task divisions",
+        args[0]
+    )
+        })
+    ));
+    pub static ref TEMPLATE_USER_PROMPT_TASK_JSON: Arc<Mutex<FormatterFn>> =
         Arc::new(Mutex::new(Box::new(|args: &[&str]| {
             format!(
-                "You're a tool use agent, here are tools avaiable to you: {}",
+                "Break down this project into subtasks: {}
+
+        Return your response as valid JSON with this structure:
+        {{
+          \"tasks\": [
+            {{
+              \"id\": \"task-1\",
+              \"name\": \"[Short descriptive name]\",
+              \"description\": \"[Detailed explanation]\",
+              \"tool\": \"[tool_name or null if no specific tool]\",
+            }},
+            ...
+          ]
+        }}
+
+        IMPORTANT NOTES:
+        - Tasks should be arranged in sequential order by default
+        - Include dependencies only when tasks can be executed in parallel
+        - The \"tool\" field should reference an available tool when applicable, or null
+        - Each task MUST include all fields shown above
+        - Keep the breakdown flat (one level only, no nested subtasks)",
                 args[0]
             )
         })));
@@ -80,10 +128,6 @@ pub const TOGETHER_CONFIG: LlmConfig = LlmConfig {
 //     base_url: "https://api.deepseek.com/chat/completions",
 //     api_key_str: "SEEK_API_KEY",
 // };
-
-type FormatterFn = Box<dyn (Fn(&[&str]) -> String) + Send + Sync>;
-
-pub static STORE: Lazy<Mutex<HashMap<String, Tool>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 pub struct AgentType(String);
 
