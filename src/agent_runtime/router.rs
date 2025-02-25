@@ -6,6 +6,8 @@ use crate::immutable_agent::{LlmAgent, Message};
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::result::Result as StdResult;
+use thiserror::Error;
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub enum RouterStatus {
@@ -14,22 +16,27 @@ pub enum RouterStatus {
     Off,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error, Clone)]
 pub enum RouterError {
+    #[error("Router is not in ready state")]
     NotReady,
-    AgentNotFound(AgentId),
-    SpawnFailed(String),
-    TopicNotFound(TopicId),
-    InvalidState(String),
-}
 
-impl From<RouterError> for ActorProcessingErr {
-    fn from(error: RouterError) -> Self {
-        Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("{:?}", error),
-        ))
-    }
+    #[error("Agent {0} not found")]
+    AgentNotFound(AgentId),
+
+    #[error("Agent {0} build failed")]
+    AgentBuildFailed(AgentId),
+
+    #[error("Failed to spawn agent: {0}")]
+    SpawnFailed(String),
+
+    #[error("Topic {0} not found")]
+    TopicNotFound(TopicId),
+
+    #[error("Invalid state: {0}")]
+    InvalidState(String),
+    // #[error("Agent actor failure: {0}")]
+    // ActorFailure(#[from] ActorProcessingErr),
 }
 
 #[derive(Clone)]
@@ -64,7 +71,7 @@ impl RouterState {
         self.state == RouterStatus::Ready
     }
 
-    fn ensure_ready(&self) -> Result<(), RouterError> {
+    fn ensure_ready(&self) -> StdResult<(), RouterError> {
         if !self.is_ready() {
             Err(RouterError::NotReady)
         } else {
@@ -76,7 +83,7 @@ impl RouterState {
         &mut self,
         agent_id: AgentId,
         topic: TopicId,
-    ) -> Result<(), RouterError> {
+    ) -> StdResult<(), RouterError> {
         self.ensure_ready()?;
 
         if !self.agents.contains_key(&agent_id) {
@@ -100,7 +107,7 @@ impl RouterState {
         &mut self,
         agent_id: AgentId,
         topic: &TopicId,
-    ) -> Result<(), RouterError> {
+    ) -> StdResult<(), RouterError> {
         self.ensure_ready()?;
 
         if !self.agents.contains_key(&agent_id) {
@@ -118,7 +125,7 @@ impl RouterState {
         Ok(())
     }
 
-    pub fn get_agent_topics(&self, agent_id: &AgentId) -> Result<Vec<TopicId>, RouterError> {
+    pub fn get_agent_topics(&self, agent_id: &AgentId) -> StdResult<Vec<TopicId>, RouterError> {
         self.ensure_ready()?;
         self.agent_subscriptions
             .get(agent_id)
@@ -126,7 +133,7 @@ impl RouterState {
             .ok_or(RouterError::AgentNotFound(*agent_id))
     }
 
-    pub fn get_topic_subscribers(&self, topic: &TopicId) -> Result<Vec<AgentId>, RouterError> {
+    pub fn get_topic_subscribers(&self, topic: &TopicId) -> StdResult<Vec<AgentId>, RouterError> {
         self.ensure_ready()?;
         self.topic_subscriptions
             .get(topic)
@@ -139,58 +146,60 @@ impl RouterState {
         system_prompt: &str,
         topic: TopicId,
         tools_map_meta: Option<Value>,
-    ) -> Result<AgentId, RouterError> {
+    ) -> StdResult<AgentId, RouterError> {
         self.ensure_ready()?;
 
         let new_agent_id = AgentId::new_v4();
-
-        let llm_agent = LlmAgent::build(
+        match LlmAgent::build(
             system_prompt.to_string(),
-            None,           // llm_config (None in this example)
-            tools_map_meta, // tools_map_meta is parsed to decide behavior (user_proxy etc.)
-            String::new(),  // description (can be customized as needed)
-        );
-
-        let agent_actor = AgentActor::new(
-            new_agent_id,
-            self.router
-                .as_ref()
-                .expect("Router not initialized")
-                .clone(),
-            llm_agent.clone(),
-        );
-
-        let (agent_ref, _) = Actor::spawn_linked(
             None,
-            agent_actor,
-            (
-                new_agent_id,
-                self.router
-                    .as_ref()
-                    .expect("Router not initialized")
-                    .clone(),
-                llm_agent,
-            ),
-            self.router
-                .as_ref()
-                .expect("Router not initialized")
-                .clone()
-                .into(),
-        )
-        .await
-        .map_err(|e| RouterError::SpawnFailed(e.to_string()))?;
+            tools_map_meta,
+            String::new(),
+        ) {
+            Ok(llm_agent) => {
+                let agent_actor = AgentActor::new(
+                    new_agent_id,
+                    self.router
+                        .as_ref()
+                        .ok_or(RouterError::InvalidState("Router reference missing".into()))?
+                        .clone(),
+                    llm_agent.clone(),
+                );
 
-        self.agents.insert(new_agent_id, agent_ref);
-        self.agent_states
-            .insert(new_agent_id, AgentState::new(new_agent_id));
-        self.agent_subscriptions.insert(new_agent_id, Vec::new());
+                let (agent_ref, _) = Actor::spawn_linked(
+                    None,
+                    agent_actor,
+                    (
+                        new_agent_id,
+                        self.router
+                            .as_ref()
+                            .ok_or(RouterError::InvalidState("Router reference missing".into()))?
+                            .clone(),
+                        llm_agent,
+                    ),
+                    self.router
+                        .as_ref()
+                        .ok_or(RouterError::InvalidState("Router reference missing".into()))?
+                        .clone()
+                        .into(),
+                )
+                .await
+                .map_err(|e| RouterError::SpawnFailed(e.to_string()))?;
 
-        self.subscribe_agent(new_agent_id, topic)?;
+                self.agents.insert(new_agent_id, agent_ref);
+                self.agent_states
+                    .insert(new_agent_id, AgentState::new(new_agent_id));
+                self.agent_subscriptions.insert(new_agent_id, Vec::new());
 
-        Ok(new_agent_id)
+                self.subscribe_agent(new_agent_id, topic)?;
+
+                Ok(new_agent_id)
+            }
+            Err(e) => Err(RouterError::AgentBuildFailed(new_agent_id)),
+        }
     }
 
-    fn shutdown_agent(&mut self, agent_id: AgentId) -> Result<(), RouterError> {
+    fn shutdown_agent(&mut self, agent_id: AgentId) -> StdResult<(), RouterError> {
         let agent_ref = self
             .agents
             .remove(&agent_id)
@@ -215,7 +224,7 @@ impl RouterState {
         topic: TopicId,
         message: Message,
         context: ActorContext,
-    ) -> Result<(), RouterError> {
+    ) -> StdResult<(), RouterError> {
         self.ensure_ready()?;
 
         let agent_ids = self
@@ -266,7 +275,7 @@ impl Actor for RouterActor {
         &self,
         myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
-    ) -> Result<Self::State, ActorProcessingErr> {
+    ) -> StdResult<Self::State, ActorProcessingErr> {
         // Initialize state here
         Ok(RouterState {
             agents: HashMap::new(),
@@ -282,7 +291,7 @@ impl Actor for RouterActor {
         myself: ActorRef<Self::Msg>,
         msg: Self::Msg,
         state: &mut Self::State, // Use state parameter for mutations
-    ) -> Result<(), ActorProcessingErr> {
+    ) -> StdResult<(), ActorProcessingErr> {
         match msg {
             RouterCommand::SpawnAgent {
                 system_prompt,

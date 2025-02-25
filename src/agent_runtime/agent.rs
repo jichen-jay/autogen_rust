@@ -2,8 +2,9 @@ use crate::agent_runtime::{ActorContext, AgentId, MessageContext, RouterCommand,
 use crate::immutable_agent::{AgentResponse, LlmAgent, Message};
 use crate::llama::Content;
 use async_openai::types::Role;
-use ractor::{Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef, MessagingErr};
 use std::fmt;
+use thiserror::Error;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -49,16 +50,17 @@ impl AgentState {
     }
 }
 
-#[derive(Debug)]
-struct ShutdownError(String);
+#[derive(Debug, Error)]
+pub enum AgentActorError {
+    #[error("Router communication failure: {0}")]
+    RouterCommunication(#[from] MessagingErr<RouterCommand>),
 
-impl fmt::Display for ShutdownError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
+    #[error("LLM processing error: {0}")]
+    LlmProcessing(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("Shutdown failed: {0}")]
+    ShutdownFailure(String),
 }
-
-impl std::error::Error for ShutdownError {}
 
 pub struct AgentActor {
     agent_id: AgentId,
@@ -124,9 +126,6 @@ impl Actor for AgentActor {
                     Ok(agent_response) => {
                         match agent_response {
                             AgentResponse::Llama(llama_response) => {
-                                //code entered this branch, but I intended that llm agent will check if this is a toolcall,
-                                //if yes, it'll go execute the function and obtain the result and then pass it on
-                                //the said logic is in default_method in llm_agent.rs
                                 println!("LLM response (Llama): {:?}", llama_response);
                                 let route_msg = RouterCommand::RouteMessage {
                                     topic: topic.clone(),
@@ -137,9 +136,9 @@ impl Actor for AgentActor {
                                     ),
                                     context: state.get_context(),
                                 };
-                                self.router.send_message(route_msg).map_err(|e| {
-                                    Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-                                })?;
+                                self.router
+                                    .send_message(route_msg)
+                                    .map_err(AgentActorError::from)?;
                             }
                             AgentResponse::Proxy(proxy_str) => {
                                 println!("LLM response (Proxy): {:?}", proxy_str);
@@ -152,24 +151,32 @@ impl Actor for AgentActor {
                                     ),
                                     context: state.get_context(),
                                 };
-                                self.router.send_message(route_msg).map_err(|e| {
-                                    Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-                                })?;
+                                self.router
+                                    .send_message(route_msg)
+                                    .map_err(AgentActorError::from)?;
                             }
                         }
                         state.processing_state = ProcessingState::Ready;
                         Ok(())
                     }
-                    Err(_e) => Err(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "Failed to process LLM response",
-                    ))),
+                    Err(e) => Err(Box::new(AgentActorError::LlmProcessing(e.into()))),
                 }
             }
 
-            (RouterCommand::ShutdownAgent { agent_id }, _) if agent_id == self.agent_id => {
-                state.processing_state = ProcessingState::Off;
-                Ok(())
+            (RouterCommand::ShutdownAgent { agent_id }, _) => {
+                if agent_id != self.agent_id {
+                    return Err(Box::new(AgentActorError::ShutdownFailure(agent_id.into())));
+                }
+
+                match state.processing_state {
+                    ProcessingState::Off => {
+                        Err(Box::new(AgentActorError::ShutdownFailure(agent_id.into())))
+                    }
+                    _ => {
+                        state.processing_state = ProcessingState::Off;
+                        Ok(())
+                    }
+                }
             }
 
             (RouterCommand::SubscribeAgent { topic, .. }, _) => {

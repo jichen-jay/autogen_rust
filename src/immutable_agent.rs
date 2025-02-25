@@ -7,10 +7,11 @@ use async_openai::types::Role;
 use log::debug;
 use ractor::ActorRef;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Error as SerdeError, Value};
 use std::collections::HashMap;
-use std::error::Error;
+use std::error::Error as StdError;
 use std::sync::{Arc, Mutex, RwLock};
+use thiserror::Error;
 use tokio::io::{stdin, AsyncBufReadExt, BufReader};
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
@@ -57,26 +58,34 @@ pub struct LlmAgent {
     tool_names: Vec<String>,
 }
 
+#[derive(Debug, Error)]
+pub enum BuilderError {
+    #[error("Failed to serialize tools metadata: {0}")]
+    MetaSerializationFailure(#[from] SerdeError),
+
+    #[error("Tool name not found in metadata at index {index}: {data}")]
+    ToolNameNotFound { index: usize, data: String },
+}
+
 impl LlmAgent {
     pub fn build(
         system_prompt: String,
         llm_config: Option<LlmConfig>,
         tools_map_meta: Option<Value>,
         description: String,
-    ) -> Self {
+    ) -> Result<Self, BuilderError> {
         let (system_prompt, tool_names) = match tools_map_meta.as_ref() {
             Some(tools_meta) => {
                 let formatter = TEMPLATE_SYSTEM_PROMPT_TOOL_USE.lock().unwrap();
-                let meta_str = tools_meta
-                    .as_str()
-                    .map(|s| s.to_owned())
-                    .unwrap_or_else(|| tools_meta.to_string());
+                let meta_str = serde_json::to_string(tools_meta)?;
+
                 let formatted_prompt = formatter(&[&system_prompt, &meta_str]);
 
                 let names = match tools_meta.as_array() {
                     Some(tools_array) => tools_array
                         .iter()
-                        .filter_map(|tool| {
+                        .enumerate()
+                        .map(|(index, tool)| {
                             tool.get("name")
                                 .and_then(|n| n.as_str())
                                 .or_else(|| {
@@ -85,23 +94,30 @@ impl LlmAgent {
                                         .and_then(|n| n.as_str())
                                 })
                                 .map(String::from)
+                                .ok_or_else(|| BuilderError::ToolNameNotFound {
+                                    index,
+                                    data: tool.to_string(),
+                                })
                         })
-                        .collect::<Vec<String>>(),
+                        .collect::<Result<Vec<String>, BuilderError>>()?,
                     None => Vec::new(),
                 };
 
-                (formatted_prompt, names)
+                Ok::<(std::string::String, Vec<std::string::String>), BuilderError>((
+                    formatted_prompt,
+                    names,
+                ))
             }
-            None => (system_prompt, Vec::new()),
-        };
+            None => Ok((system_prompt, Vec::new())),
+        }?;
 
-        Self {
+        Ok(Self {
             system_prompt,
             llm_config,
             description,
             tools_map_meta,
             tool_names,
-        }
+        })
     }
 
     pub async fn default_method(&self, input: &str) -> Result<AgentResponse> {
