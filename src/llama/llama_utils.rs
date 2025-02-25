@@ -1,3 +1,13 @@
+use crate::llama::{
+    output_llama_response, JsonStr, LlamaResponseError, LlamaResponseMessage, ToolCall,
+};
+use crate::LlmConfig;
+use anyhow::Context;
+use reqwest::{
+    header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT},
+    ClientBuilder,
+};
+
 use anyhow::{anyhow, Result};
 use async_openai::types::{CompletionUsage, CreateChatCompletionResponse, Role};
 use log;
@@ -7,73 +17,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::result::Result as StdResult;
 use thiserror::Error;
-
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-pub struct ToolCall {
-    pub name: String,
-    pub arguments: Option<String>,
-}
-
-#[allow(non_snake_case)]
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-pub enum Content {
-    Text(String),
-    JsonStr(JsonStr),
-}
-
-#[allow(non_snake_case)]
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-pub enum JsonStr {
-    ToolCall(ToolCall),
-    JsonLoad(Value),
-}
-
-impl Content {
-    pub fn content_to_string(&self) -> String {
-        match self {
-            Content::Text(text) => text.clone(),
-            Content::JsonStr(json_data) => match json_data {
-                JsonStr::ToolCall(tool_call) => {
-                    format!(
-                        "tool_call: {}, arguments: {:?}",
-                        tool_call.name, tool_call.arguments
-                    )
-                }
-                JsonStr::JsonLoad(val) => format!("json_load: {}", val),
-            },
-        }
-    }
-
-    pub fn from_str(input: &str) -> Content {
-        match serde_json::from_str::<Value>(input) {
-            Ok(json_value) => {
-                if let Some(name) = json_value.get("name").and_then(|v| v.as_str()) {
-                    let arguments = json_value.get("arguments").map(|v| v.to_string());
-                    Content::JsonStr(JsonStr::ToolCall(ToolCall {
-                        name: name.to_owned(),
-                        arguments,
-                    }))
-                } else {
-                    Content::JsonStr(JsonStr::JsonLoad(json_value))
-                }
-            }
-            Err(_) => Content::Text(input.to_string()),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-pub struct LlamaResponseMessage {
-    pub content: Content,
-    pub role: Role,
-    pub usage: CompletionUsage,
-}
-
-impl LlamaResponseMessage {
-    pub fn content_to_string(&self) -> String {
-        self.content.content_to_string()
-    }
-}
 
 pub fn extract_json_from_xml_like(
     xml_like_data: &str,
@@ -92,72 +35,6 @@ pub fn extract_json_from_xml_like(
         Ok(trimmed[start_pos..end_pos].trim().to_string())
     } else {
         Err(XmlParseError)
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum LlamaResponseError {
-    #[error("No choices available in response")]
-    NoChoices,
-    #[error("Message content missing in choice")]
-    MissingMessageContent,
-    #[error("Usage data missing in response")]
-    MissingUsageData,
-    #[error("Role information missing")]
-    MissingRole,
-    #[error("JSON extraction from XML failed: {0}")]
-    JsonExtractionError(String),
-    #[error("JSON pretty print formatting failed: {0}")]
-    JsonFormatError(String),
-    #[error("Tool call parsing error: {0}")]
-    ToolCallParseError(String),
-}
-
-pub fn output_llama_response(
-    res_obj: CreateChatCompletionResponse,
-) -> StdResult<LlamaResponseMessage, Box<dyn std::error::Error>> {
-    let usage = res_obj.usage.ok_or_else(|| {
-        Box::new(LlamaResponseError::MissingUsageData) as Box<dyn std::error::Error>
-    })?;
-    let choice = res_obj
-        .choices
-        .first()
-        .ok_or_else(|| Box::new(LlamaResponseError::NoChoices) as Box<dyn std::error::Error>)?;
-    let msg_obj = &choice.message;
-
-    let role = msg_obj.role.clone();
-    let data = msg_obj.content.as_ref().ok_or_else(|| {
-        Box::new(LlamaResponseError::MissingMessageContent) as Box<dyn std::error::Error>
-    })?;
-
-    let json_str = extract_json_from_xml_like(data).map_err(|e| {
-        Box::new(LlamaResponseError::JsonExtractionError(e.to_string()))
-            as Box<dyn std::error::Error>
-    })?;
-    let pretty_json = jsonxf::pretty_print(&json_str).map_err(|e| {
-        Box::new(LlamaResponseError::JsonFormatError(e.to_string())) as Box<dyn std::error::Error>
-    })?;
-    println!("Json Output original string:\n{}\n", pretty_json);
-
-    match extract_tool_call_json(&json_str) {
-        Ok(json_data) => {
-            Ok::<LlamaResponseMessage, Box<dyn std::error::Error>>(LlamaResponseMessage {
-                content: Content::JsonStr(json_data),
-                role,
-                usage,
-            })
-        }
-        Err(e) => {
-            log::warn!(
-                "Falling back to text content due to tool call parse error: {}",
-                e
-            );
-            Ok(LlamaResponseMessage {
-                content: Content::Text(data.to_string()),
-                role,
-                usage,
-            })
-        }
     }
 }
 
@@ -257,4 +134,87 @@ pub fn repair_json_with_tool(input: &str) -> StdResult<String, impl std::error::
     let res = String::from_utf8(output.stdout)?;
     println!("repair output: {:?}", res);
     Ok(res)
+}
+
+pub fn parse_next_move_and_(
+    input: &str,
+    next_marker: Option<&str>,
+) -> (bool, Option<String>, Vec<String>) {
+    let json_regex = Regex::new(r"\{[^}]*\}").unwrap();
+    let json_str = json_regex
+        .captures(input)
+        .and_then(|cap| cap.get(0))
+        .map_or(String::new(), |m| m.as_str().to_string());
+
+    let continue_or_terminate_regex =
+        Regex::new(r#""continue_or_terminate":\s*"([^"]*)""#).unwrap();
+    let continue_or_terminate = continue_or_terminate_regex
+        .captures(&json_str)
+        .and_then(|cap| cap.get(1))
+        .map_or(String::new(), |m| m.as_str().to_string());
+
+    let next_move = match next_marker {
+        Some(marker) => {
+            let next_marker_regex = Regex::new(&format!(r#""{}":\s*"([^"]*)""#, marker)).unwrap();
+            Some(
+                next_marker_regex
+                    .captures(&json_str)
+                    .and_then(|cap| cap.get(1))
+                    .map_or(String::new(), |m| m.as_str().to_string()),
+            )
+        }
+        None => None,
+    };
+
+    let key_points_array_regex = Regex::new(r#""key_points":\s*\[(.*?)\]"#).unwrap();
+
+    let key_points_array = key_points_array_regex
+        .captures(&json_str)
+        .and_then(|cap| cap.get(1))
+        .map_or(String::new(), |m| m.as_str().to_string());
+
+    let key_points: Vec<String> = if !key_points_array.is_empty() {
+        key_points_array
+            .split(',')
+            .map(|s| s.trim().trim_matches('"').to_string())
+            .collect()
+    } else {
+        vec![]
+    };
+
+    (&continue_or_terminate == "TERMINATE", next_move, key_points)
+}
+
+pub fn parse_planning_sub_tasks(input: &str) -> (Vec<String>, String, String) {
+    let sub_tasks_regex = Regex::new(r#""sub_tasks":\s*(\[[^\]]*\])"#).unwrap();
+    let sub_tasks_str = sub_tasks_regex
+        .captures(input)
+        .and_then(|cap| cap.get(1))
+        .map_or(String::new(), |m| m.as_str().to_string());
+
+    let solution_found_regex = Regex::new(r#""solution_found":\s*"([^"]*)""#).unwrap();
+    let solution_found = solution_found_regex
+        .captures(input)
+        .and_then(|cap| cap.get(1))
+        .map_or(String::new(), |m| m.as_str().to_string());
+
+    if sub_tasks_str.is_empty() {
+        eprintln!("Failed to extract 'sub_tasks' from input.");
+        return (vec![], input.to_string(), solution_found);
+    }
+    let task_summary_regex = Regex::new(r#""task_summary":\s*"([^"]*)""#).unwrap();
+    let task_summary = task_summary_regex
+        .captures(input)
+        .and_then(|cap| cap.get(1))
+        .map_or(String::new(), |m| m.as_str().to_string());
+
+    let parsed_sub_tasks: Vec<String> = match serde_json::from_str(&sub_tasks_str) {
+        Ok(val) => val,
+        Err(_) => {
+            eprintln!("Failed to parse extracted 'sub_tasks' as JSON.");
+            return (vec![], task_summary, solution_found);
+        }
+    };
+
+    (parsed_sub_tasks, task_summary, solution_found)
 }

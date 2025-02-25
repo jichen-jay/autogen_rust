@@ -1,14 +1,13 @@
 #![allow(warnings, deprecated)]
 
-pub mod actor;
+pub mod agent_runtime;
 pub mod immutable_agent;
-pub mod llama_structs;
-pub mod llm_utils;
+pub mod llama;
 pub mod use_tool;
-pub mod utils;
 use crate::use_tool::{Tool, TypeConverter};
 use anyhow::Result;
 use ctor::ctor;
+use lazy_static::lazy_static;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -18,6 +17,24 @@ use std::io::{stdin, BufReader};
 use std::sync::{Arc, Mutex};
 use tokio::time::{timeout, Duration};
 use tool_builder::create_tool_with_function;
+
+lazy_static! {
+    static ref END_STR: &'static str = r#"</tools> Use the following pydantic model json schema for each tool call you will make: {"properties": {"arguments": {"title": "Arguments", "type": "object"}, "name": {"title": "Name", "type": "string"}}, "required": ["arguments", "name"], "title": "FunctionCall", "type": "object"} For each function call return a json object with function name and arguments within <tool_call></tool_call> XML tags as follows:
+<tool_call>
+{"arguments": <args-dict>, "name": <function-name>}
+</tool_call>"#;
+    pub static ref TEMPLATE_SYSTEM_PROMPT_TOOL_USE: Arc<Mutex<FormatterFn>> =
+        Arc::new(Mutex::new(Box::new(|args: &[&str]| {
+            format!("{}{}{}", args[0], args[1], *END_STR)
+        })));
+    pub static ref TEMPLATE_: Arc<Mutex<FormatterFn>> =
+        Arc::new(Mutex::new(Box::new(|args: &[&str]| {
+            format!(
+                "You're a tool use agent, here are tools avaiable to you: {}",
+                args[0]
+            )
+        })));
+}
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct LlmConfig {
@@ -86,21 +103,6 @@ pub struct FunctionCallInput {
     pub function_name: String,
     pub return_type: String,
 }
-
-// pub struct FunctionCall {
-//     pub id: String,
-//     pub args: &'static [u8],
-//     pub name: String,
-// }
-
-// impl FunctionCall {
-//     pub fn run(self) {
-//         let bindings = &STORE;
-//         let function = bindings.get(&self.name).unwrap();
-
-//         function(self.args);
-//     }
-// }
 
 type MyResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 

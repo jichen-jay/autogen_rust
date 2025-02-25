@@ -1,13 +1,9 @@
-use crate::actor::{agent::AgentActor, AgentId, TopicId};
-use crate::llama_structs::*;
-use crate::llm_utils::*;
-use crate::utils::*;
-use crate::STORE;
-use crate::{FormatterFn, LlmConfig, TOGETHER_CONFIG};
+use crate::agent_runtime::{agent::AgentActor, AgentId, TopicId};
+use crate::llama::*;
+use crate::{FormatterFn, LlmConfig, STORE, TEMPLATE_SYSTEM_PROMPT_TOOL_USE, TOGETHER_CONFIG};
 use anyhow::Result;
 use async_openai::types::CompletionUsage;
 use async_openai::types::Role;
-use lazy_static::lazy_static;
 use log::debug;
 use ractor::ActorRef;
 use serde::{Deserialize, Serialize};
@@ -18,24 +14,6 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::io::{stdin, AsyncBufReadExt, BufReader};
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
-
-lazy_static! {
-    static ref END_STR: &'static str = r#"</tools> Use the following pydantic model json schema for each tool call you will make: {"properties": {"arguments": {"title": "Arguments", "type": "object"}, "name": {"title": "Name", "type": "string"}}, "required": ["arguments", "name"], "title": "FunctionCall", "type": "object"} For each function call return a json object with function name and arguments within <tool_call></tool_call> XML tags as follows:
-<tool_call>
-{"arguments": <args-dict>, "name": <function-name>}
-</tool_call>"#;
-    pub static ref TEMPLATE_SYSTEM_PROMPT_TOOL_USE: Arc<Mutex<FormatterFn>> =
-        Arc::new(Mutex::new(Box::new(|args: &[&str]| {
-            format!("{}{}{}", args[0], args[1], *END_STR)
-        })));
-    pub static ref TEMPLATE_tool_call: Arc<Mutex<FormatterFn>> =
-        Arc::new(Mutex::new(Box::new(|args: &[&str]| {
-            format!(
-                "You're a tool use agent, here are tools avaiable to you: {}",
-                args[0]
-            )
-        })));
-}
 
 #[derive(Debug, Clone)]
 pub enum AgentResponse {

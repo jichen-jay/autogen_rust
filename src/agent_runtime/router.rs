@@ -1,4 +1,4 @@
-use crate::actor::{
+use crate::agent_runtime::{
     agent::{AgentActor, AgentState},
     ActorContext, AgentId, RouterCommand, SpawnAgentResponse, TopicId,
 };

@@ -1,6 +1,6 @@
-use crate::actor::{ActorContext, AgentId, MessageContext, RouterCommand, TopicId};
+use crate::agent_runtime::{ActorContext, AgentId, MessageContext, RouterCommand, TopicId};
 use crate::immutable_agent::{AgentResponse, LlmAgent, Message};
-use crate::llama_structs::Content;
+use crate::llama::Content;
 use async_openai::types::Role;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::fmt;
@@ -124,7 +124,7 @@ impl Actor for AgentActor {
                     Ok(agent_response) => {
                         match agent_response {
                             AgentResponse::Llama(llama_response) => {
-                                //code entered this branch, but I intended that llm agent will check if this is a toolcall, 
+                                //code entered this branch, but I intended that llm agent will check if this is a toolcall,
                                 //if yes, it'll go execute the function and obtain the result and then pass it on
                                 //the said logic is in default_method in llm_agent.rs
                                 println!("LLM response (Llama): {:?}", llama_response);
