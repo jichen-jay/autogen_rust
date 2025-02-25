@@ -11,6 +11,7 @@ use autogen_rust::agent_runtime::{
 use autogen_rust::llama::*;
 use autogen_rust::FormatterWrapper;
 use autogen_rust::{immutable_agent::*, llama::Content};
+use autogen_rust::{TEMPLATE_SYSTEM_PROMPT_TOOL_USE, TEMPLATE_USER_PROMPT_TASK_JSON};
 use env_logger;
 use ractor::{call_t, rpc::CallResult, spawn_named, Actor, ActorCell, ActorRef, RpcReplyPort};
 use serde_json::{json, Value};
@@ -42,8 +43,8 @@ async fn main() -> Result<()> {
 
     let task_agent_id = spawn_agent(
         router_ref.clone(),
-        "<|im_start|>system You are a function calling AI model. You are provided with function signatures within <tools></tools> XML tags. You may call one or more functions to assist with the user query. Don't make assumptions about what values to plug into functions. Here are the available tools: <tools>".to_string(),
-      None,
+        TEMPLATE_SYSTEM_PROMPT_TOOL_USE.to_string(),
+        Some(TEMPLATE_USER_PROMPT_TASK_JSON.clone()),
         TopicId::from("chat"),
         Some(json!([{
             "type": "function",

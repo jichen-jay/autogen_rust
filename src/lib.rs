@@ -24,14 +24,37 @@ type FormatterFn = Box<dyn (Fn(&[&str]) -> String) + Send + Sync>;
 pub static STORE: Lazy<Mutex<HashMap<String, Tool>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 lazy_static! {
-    static ref END_STR: &'static str = r#"</tools> Use the following pydantic model json schema for each tool call you will make: {"properties": {"arguments": {"title": "Arguments", "type": "object"}, "name": {"title": "Name", "type": "string"}}, "required": ["arguments", "name"], "title": "FunctionCall", "type": "object"} For each function call return a json object with function name and arguments within <tool_call></tool_call> XML tags as follows:
-<tool_call>
-{"arguments": <args-dict>, "name": <function-name>}
-</tool_call>"#;
-    pub static ref TEMPLATE_SYSTEM_PROMPT_TOOL_USE: Arc<Mutex<FormatterFn>> =
-        Arc::new(Mutex::new(Box::new(|args: &[&str]| {
-            format!("{}{}{}", args[0], args[1], *END_STR)
-        })));
+    // pub static ref TEMPLATE_SYSTEM_PROMPT_TOOL_USE: Arc<Mutex<FormatterFn>> =
+    //     Arc::new(Mutex::new(Box::new(|args: &[&str]| {
+    //         format!("{}{}{}", args[0], args[1], *END_STR)
+    //     })));
+
+pub static ref TEMPLATE_SYSTEM_PROMPT_TOOL_USE: &'static str = "You are an AI assistant that can use tools to help users. Think step-by-step about which tool is most appropriate for each task.";
+
+pub static ref TEMPLATE_USER_PROMPT_TOOL_USE: Arc<Mutex<FormatterFn>> =
+    Arc::new(Mutex::new(Box::new(|args: &[&str]| {
+        format!(
+            "<|im_start|>user Task: {}\n\n\
+            AVAILABLE TOOLS:\n{}\n\n\
+            RESPONSE FORMAT INSTRUCTIONS:\n\
+            Use the following pydantic model json schema for each tool call you make:\n\
+            {{\
+            \"properties\": {{\
+            \"arguments\": {{\"title\": \"Arguments\", \"type\": \"object\"}}, \
+            \"name\": {{\"title\": \"Name\", \"type\": \"string\"}}\
+            }}, \
+            \"required\": [\"arguments\", \"name\"], \
+            \"title\": \"FunctionCall\", \
+            \"type\": \"object\"\
+            }}\n\n\
+            Return NOTHING but your tool call ONLY, within <tool_call></tool_call> XML tags as follows:\n\
+            <tool_call>\n\
+            {{\"arguments\": <args-dict>, \"name\": <function-name>}}\n\
+            </tool_call><|im_end|>",
+            args[0], args[1]
+        )
+    })));
+
     pub static ref TEMPLATE_SYSTEM_PROMPT_PLANNER: Arc<Mutex<FormatterFn>> = Arc::new(Mutex::new(
         Box::new(|args: &[&str]| {
             format!(

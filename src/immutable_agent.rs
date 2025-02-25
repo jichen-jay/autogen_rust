@@ -83,10 +83,7 @@ impl LlmAgent {
     ) -> Result<Self, BuilderError> {
         let (system_prompt, tool_names) = match tools_map_meta.as_ref() {
             Some(tools_meta) => {
-                let formatter = TEMPLATE_SYSTEM_PROMPT_TOOL_USE.lock().unwrap();
-                let meta_str = serde_json::to_string(tools_meta)?;
-
-                let formatted_prompt = formatter(&[&system_prompt, &meta_str]);
+                let formatted_prompt = TEMPLATE_SYSTEM_PROMPT_TOOL_USE.to_string();
 
                 let names = match tools_meta.as_array() {
                     Some(tools_array) => tools_array
@@ -167,11 +164,21 @@ impl LlmAgent {
                 Ok(AgentResponse::Proxy(output))
             }
             _ => {
-                let available_tools = tool_names.join(", ");
-                let user_prompt = format!(
-                    "Task: {}\nAvailable tools: {}.\nIf necessary, include a tool to use in your response.",
-                    input, available_tools
-                );
+                // let available_tools = tool_names.join(", ");
+                // let user_prompt = format!(
+                //     "Task: {}\nAvailable tools: {}.\nIf necessary, include a tool to use in your response.",
+                //     input, available_tools
+                // );
+                let user_prompt = match &self.user_prompt_formatter {
+                    None => format!("here is your task: {}", input),
+
+                    Some(f) => {
+                        let formatter = f.lock().unwrap();
+
+                        formatter(&[&input])
+                    }
+                };
+
                 let max_token = 1000u16;
                 let config = self.llm_config.as_ref().unwrap_or(&TOGETHER_CONFIG);
 

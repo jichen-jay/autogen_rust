@@ -29,6 +29,7 @@ pub fn extract_json_from_xml_like(
     let end_tag = "</tool_call>";
 
     let trimmed = xml_like_data.trim();
+    println!("trimmed xml-like-data:\n{}", trimmed.clone());
     if trimmed.starts_with(start_tag) && trimmed.ends_with(end_tag) {
         let start_pos = start_tag.len();
         let end_pos = trimmed.len() - end_tag.len();
