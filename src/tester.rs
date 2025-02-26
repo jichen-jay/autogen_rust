@@ -7,7 +7,7 @@ use async_openai::types::{CompletionUsage, CreateChatCompletionResponse, Role};
 use autogen_rust::agent_runtime::{
     agent::{AgentActor, AgentState},
     router::{RouterActor, RouterState, RouterStatus},
-    ActorContext, AgentId, MessageContext, RouterCommand, SpawnAgentResponse, TopicId,
+    ActorContext, AgentId, MessageContext, RouterCommand, SpawnLlamaResponseMessage, TopicId,
 };
 use autogen_rust::{immutable_agent::*, llama::*, FormatterWrapper, LlmConfig};
 use autogen_rust::{
@@ -56,6 +56,17 @@ async fn main() -> Result<()> {
 {
 "type": "function",
 "function": {
+"name": "get_user_feedback",
+"description": "get user's input in terminal",
+"parameters": {
+"type": "object",
+"properties": null,
+}
+}
+},
+{
+"type": "function",
+"function": {
 "name": "process_values",
 "description": "Processes up to 5 different types of values",
 "parameters": {
@@ -88,7 +99,9 @@ async fn main() -> Result<()> {
 }]).to_string();
 
     let TOGETHER_CONFIG: LlmConfig = LlmConfig {
-        model: "google/gemma-2-9b-it",
+        model: "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
+        // model: "Qwen/Qwen2.5-7B-Instruct-Turbo",
+        // model: "google/gemma-2-9b-it",
         // model: "mistralai/Mistral-Small-24B-Instruct-2501",
         // model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
         context_size: 8192,
@@ -110,8 +123,8 @@ async fn main() -> Result<()> {
     let pretty_json = unescape(&system_prompt)?;
     println!("system_prompt:\n {}\n\n", pretty_json);
 
-    let input =
-        "Fetch the weather of New York in Celsius unit".to_string();
+    // let input = "Fetch the weather of New York in Celsius unit".to_string();
+    let input = "get user's input in terminal".to_string();
     let formatter = TEMPLATE_USER_PROMPT_TOOL_USE.lock().unwrap();
 
     let user_prompt = formatter(&[&input, &tools_map_meta]);

@@ -1,19 +1,20 @@
 pub mod llama_utils;
 
-use crate::LlmConfig;
+use crate::{immutable_agent::TaskOutput, LlmConfig};
+use anyhow::{anyhow, Result};
+use async_openai::types::{CompletionUsage, CreateChatCompletionResponse, Role};
 use llama_utils::*;
 use log;
-use async_openai::types::{CompletionUsage, CreateChatCompletionResponse, Role};
 use regex::Regex;
 use reqwest::{
     header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT},
     ClientBuilder,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::result::Result as StdResult;
-use anyhow::{anyhow, Result};
 use thiserror::Error;
 
 #[derive(thiserror::Error, Debug)]
@@ -48,7 +49,10 @@ pub async fn chat_inner_async_wrapper(
     system_prompt: &str,
     input: &str,
     max_token: u16,
-) -> anyhow::Result<LlamaResponseMessage> {
+) -> anyhow::Result<CreateChatCompletionResponse>
+where
+    for<'de> CreateChatCompletionResponse: serde::Deserialize<'de>,
+{
     let api_key = std::env::var(&llm_config.api_key_str)?;
     let bearer_token = format!("Bearer {}", api_key);
 
@@ -73,17 +77,10 @@ pub async fn chat_inner_async_wrapper(
     let client = ClientBuilder::new().default_headers(headers).build()?;
 
     let response = client.post(llm_config.base_url).body(body).send().await?;
-
-    let response_body: CreateChatCompletionResponse = response.json().await?;
-
-    // let pretty_json =
-    //     jsonxf::pretty_print(&response_body).map_err(ChatInnerError::PrettyPrintError)?;
-    // println!("raw response_body: {}", pretty_json);
-
-    match output_llama_response(response_body) {
-        Ok(res) => Ok(res),
-        Err(e) => Err(anyhow::anyhow!(e.to_string())),
-    }
+    response
+        .json::<CreateChatCompletionResponse>()
+        .await
+        .map_err(Into::into)
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -171,8 +168,9 @@ pub enum LlamaResponseError {
     ToolCallParseError(String),
 }
 
-pub fn output_llama_response(
+pub fn output_response_by_task(
     res_obj: CreateChatCompletionResponse,
+    task_type: TaskOutput,
 ) -> StdResult<LlamaResponseMessage, Box<dyn std::error::Error>> {
     let usage = res_obj.usage.ok_or_else(|| {
         Box::new(LlamaResponseError::MissingUsageData) as Box<dyn std::error::Error>
@@ -188,33 +186,42 @@ pub fn output_llama_response(
         Box::new(LlamaResponseError::MissingMessageContent) as Box<dyn std::error::Error>
     })?;
 
-    let json_str = extract_json_from_xml_like(data).map_err(|e| {
-        Box::new(LlamaResponseError::JsonExtractionError(e.to_string()))
-            as Box<dyn std::error::Error>
-    })?;
-    let pretty_json = jsonxf::pretty_print(&json_str).map_err(|e| {
-        Box::new(LlamaResponseError::JsonFormatError(e.to_string())) as Box<dyn std::error::Error>
-    })?;
-    println!("Json Output original string:\n{}\n", pretty_json);
+    let content = match task_type {
+        TaskOutput::text => Content::Text(data.to_string()),
+        TaskOutput::tool_call => {
+            let json_str = extract_json_from_xml_like(data)
+                .map_err(|e| Box::new(LlamaResponseError::JsonExtractionError(e.to_string())))?;
+            let pretty_json = jsonxf::pretty_print(&json_str)
+                .map_err(|e| Box::new(LlamaResponseError::JsonFormatError(e.to_string())))?;
+            println!("JSON Output:\n{}\n", pretty_json);
 
-    match extract_tool_call_json(&json_str) {
-        Ok(json_data) => {
-            Ok::<LlamaResponseMessage, Box<dyn std::error::Error>>(LlamaResponseMessage {
-                content: Content::JsonStr(json_data),
-                role,
-                usage,
-            })
+            match extract_tool_call_json(&json_str) {
+                Ok(tc) => Content::JsonStr(JsonStr::ToolCall(tc)),
+                Err(e) => {
+                    log::warn!("Tool call parse error, falling back to text: {}", e);
+                    Content::Text(data.to_string())
+                }
+            }
         }
-        Err(e) => {
-            log::warn!(
-                "Falling back to text content due to tool call parse error: {}",
-                e
-            );
-            Ok(LlamaResponseMessage {
-                content: Content::Text(data.to_string()),
-                role,
-                usage,
-            })
+        TaskOutput::plan => {
+            let tasks = parse_planning_tasks(data).map_err(|e| {
+                LlamaResponseError::ToolCallParseError(format!(
+                    "Failed to parse planning tasks: {}",
+                    e
+                ))
+            })?;
+
+            let planning_data = json!({
+                "tasks": tasks
+            });
+
+            Content::JsonStr(JsonStr::JsonLoad(planning_data))
         }
-    }
+    };
+
+    Ok(LlamaResponseMessage {
+        content,
+        role,
+        usage,
+    })
 }

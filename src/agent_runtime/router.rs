@@ -2,7 +2,7 @@ use crate::agent_runtime::{
     agent::{AgentActor, AgentState},
     ActorContext, AgentId, RouterCommand, SpawnAgentResponse, TopicId,
 };
-use crate::immutable_agent::{LlmAgent, Message};
+use crate::immutable_agent::{LlmAgent, Message, TaskOutput};
 use crate::FormatterWrapper;
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef};
 use serde_json::Value;
@@ -148,6 +148,8 @@ impl RouterState {
         user_prompt_formatter: Option<FormatterWrapper>,
         topic: TopicId,
         tools_map_meta: Option<Value>,
+        description: String,
+        task_type: TaskOutput,
     ) -> StdResult<AgentId, RouterError> {
         self.ensure_ready()?;
 
@@ -157,7 +159,8 @@ impl RouterState {
             user_prompt_formatter,
             None,
             tools_map_meta,
-            String::new(),
+            description,
+            task_type,
         ) {
             Ok(llm_agent) => {
                 let agent_actor = AgentActor::new(
@@ -301,6 +304,8 @@ impl Actor for RouterActor {
                 user_prompt_formatter,
                 topic,
                 tools_map_meta,
+                description,
+                task_type,
                 reply_to,
             } => match state
                 .spawn_agent_w_actor(
@@ -308,6 +313,8 @@ impl Actor for RouterActor {
                     user_prompt_formatter,
                     topic.clone(),
                     tools_map_meta,
+                    description,
+                    task_type,
                 )
                 .await
             {

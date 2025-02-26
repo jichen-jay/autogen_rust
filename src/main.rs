@@ -6,7 +6,7 @@ use async_openai::types::Role;
 use autogen_rust::agent_runtime::{
     agent::{AgentActor, AgentState},
     router::{RouterActor, RouterState, RouterStatus},
-    ActorContext, AgentId, MessageContext, RouterCommand, SpawnAgentResponse, TopicId,
+    ActorContext, AgentId, MessageContext, RouterCommand, SpawnLlamaResponseMessage, TopicId,
 };
 use autogen_rust::llama::*;
 use autogen_rust::FormatterWrapper;
@@ -41,12 +41,9 @@ async fn main() -> Result<()> {
     // )
     // .await?;
 
-    let task_agent_id = spawn_agent(
-        router_ref.clone(),
-        TEMPLATE_SYSTEM_PROMPT_TOOL_USE.to_string(),
-        Some(TEMPLATE_USER_PROMPT_TASK_JSON.clone()),
-        TopicId::from("chat"),
-        Some(json!([{
+    let description = "tool use agent".to_string();
+    let task_type = TaskOutput::tool_call;
+    let tools_map_meta = json!([{
             "type": "function",
             "function": {
             "name": "get_current_weather",
@@ -99,8 +96,17 @@ async fn main() -> Result<()> {
         },
         "required": ["a", "b", "c", "d", "e"]
     }
-}
-}]))
+    }
+    }]);
+
+    let task_agent_id = spawn_agent(
+        router_ref.clone(),
+        TEMPLATE_SYSTEM_PROMPT_TOOL_USE.to_string(),
+        Some(TEMPLATE_USER_PROMPT_TASK_JSON.clone()),
+        TopicId::from("chat"),
+        Some(tools_map_meta),
+        description,
+        task_type,
     )
     .await?;
     println!("Task agent id: {}", task_agent_id);
@@ -169,6 +175,8 @@ async fn spawn_agent(
     user_prompt_formatter: Option<FormatterWrapper>,
     topic: TopicId,
     tools_map_meta: Option<Value>,
+    description: String,
+    task_type: TaskOutput,
 ) -> Result<AgentId> {
     let spawn_response = router_ref
         .call(
@@ -177,6 +185,8 @@ async fn spawn_agent(
                 user_prompt_formatter,
                 topic,
                 tools_map_meta,
+                description,
+                task_type,
                 reply_to,
             },
             None, // Optional timeout can be passed here if needed.

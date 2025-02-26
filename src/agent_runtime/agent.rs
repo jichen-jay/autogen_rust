@@ -1,6 +1,7 @@
 use crate::agent_runtime::{ActorContext, AgentId, MessageContext, RouterCommand, TopicId};
-use crate::immutable_agent::{AgentResponse, LlmAgent, Message};
+use crate::immutable_agent::{LlmAgent, Message};
 use crate::llama::Content;
+use crate::llama::LlamaResponseMessage;
 use async_openai::types::Role;
 use ractor::{Actor, ActorProcessingErr, ActorRef, MessagingErr};
 use std::fmt;
@@ -123,39 +124,21 @@ impl Actor for AgentActor {
                 println!("Agent {} processing message: {:?}", self.agent_id, input);
 
                 match self.llm.default_method(&input).await {
-                    Ok(agent_response) => {
-                        match agent_response {
-                            AgentResponse::Llama(llama_response) => {
-                                println!("LLM response (Llama): {:?}", llama_response);
-                                let route_msg = RouterCommand::RouteMessage {
-                                    topic: topic.clone(),
-                                    message: Message::new(
-                                        Content::Text(llama_response.content.content_to_string()),
-                                        None,
-                                        Role::Assistant,
-                                    ),
-                                    context: state.get_context(),
-                                };
-                                self.router
-                                    .send_message(route_msg)
-                                    .map_err(AgentActorError::from)?;
-                            }
-                            AgentResponse::Proxy(proxy_str) => {
-                                println!("LLM response (Proxy): {:?}", proxy_str);
-                                let route_msg = RouterCommand::RouteMessage {
-                                    topic: topic.clone(),
-                                    message: Message::new(
-                                        Content::Text(proxy_str),
-                                        None,
-                                        Role::Assistant,
-                                    ),
-                                    context: state.get_context(),
-                                };
-                                self.router
-                                    .send_message(route_msg)
-                                    .map_err(AgentActorError::from)?;
-                            }
-                        }
+                    Ok(llama_response) => {
+                        println!("LLM response (Llama): {:?}", llama_response);
+                        let route_msg = RouterCommand::RouteMessage {
+                            topic: topic.clone(),
+                            message: Message::new(
+                                Content::Text(llama_response.content.content_to_string()),
+                                None,
+                                Role::Assistant,
+                            ),
+                            context: state.get_context(),
+                        };
+                        self.router
+                            .send_message(route_msg)
+                            .map_err(AgentActorError::from)?;
+
                         state.processing_state = ProcessingState::Ready;
                         Ok(())
                     }

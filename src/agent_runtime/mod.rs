@@ -1,7 +1,7 @@
 pub mod agent;
 pub mod router;
 
-use crate::immutable_agent::{LlmAgent, Message};
+use crate::immutable_agent::{LlmAgent, Message, TaskOutput};
 use crate::FormatterWrapper;
 use ractor::{ActorRef, RpcReplyPort};
 use serde_json::Value;
@@ -78,6 +78,8 @@ pub enum RouterCommand {
         topic: TopicId,
         reply_to: RpcReplyPort<SpawnAgentResponse>,
         tools_map_meta: Option<Value>,
+        description: String,
+        task_type: TaskOutput,
     },
 }
 
@@ -116,8 +118,10 @@ impl std::fmt::Debug for RouterCommand {
                 system_prompt,
                 user_prompt_formatter: _,
                 topic,
-                reply_to,
                 tools_map_meta,
+                description,
+                task_type,
+                reply_to,
             } => {
                 f.debug_struct("SpawnAgent")
                     .field("system_prompt", system_prompt)

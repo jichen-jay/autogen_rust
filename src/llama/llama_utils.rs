@@ -1,5 +1,5 @@
 use crate::llama::{
-    output_llama_response, JsonStr, LlamaResponseError, LlamaResponseMessage, ToolCall,
+    output_response_by_task, JsonStr, LlamaResponseError, LlamaResponseMessage, ToolCall,
 };
 use crate::LlmConfig;
 use anyhow::Context;
@@ -39,7 +39,7 @@ pub fn extract_json_from_xml_like(
     }
 }
 
-pub fn extract_tool_call_json(input: &str) -> StdResult<JsonStr, Box<dyn std::error::Error>> {
+pub fn extract_tool_call_json(input: &str) -> StdResult<ToolCall, Box<dyn std::error::Error>> {
     #[derive(thiserror::Error, Debug)]
     enum ExtractError {
         #[error("JSON repair failed: {0}")]
@@ -60,54 +60,44 @@ pub fn extract_tool_call_json(input: &str) -> StdResult<JsonStr, Box<dyn std::er
         repair_json_with_tool(input).map_err(|e| ExtractError::RepairError(Box::new(e)))?;
     let parsed = serde_json::from_str::<serde_json::Value>(&repaired_input)?;
 
-    if let Some(name_val) = parsed.get("name") {
-        if name_val.is_string() {
-            let name = name_val.as_str().unwrap().to_string();
-            // Optionally attempt to extract arguments from the tool call.
-            let arguments_slice = if parsed.get("arguments").is_some() {
-                let re_args = Regex::new(r#"(?s)"arguments"\s*:\s*(?P<args>\{.*?\})"#)?;
-                if let Some(cap_args) = re_args.captures(&repaired_input) {
-                    cap_args
-                        .name("args")
-                        .ok_or(ExtractError::NoArguments)?
-                        .as_str()
-                        .to_string()
-                        .into()
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+    let name = parsed
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or(ExtractError::NoName)?
+        .to_string();
 
-            return Ok(JsonStr::ToolCall(ToolCall {
-                name,
-                arguments: arguments_slice,
-            }));
-        }
-    } else {
-        return Ok(JsonStr::JsonLoad(parsed));
+    let arguments = parsed.get("arguments").and_then(|args| {
+        let re_args = Regex::new(r#"(?s)"arguments"\s*:\s*(?P<args>\{.*?\})"#).ok()?;
+        re_args
+            .captures(&repaired_input)
+            .and_then(|cap| cap.name("args"))
+            .map(|m| m.as_str().to_string())
+    });
+
+    if !name.is_empty() {
+        return Ok(ToolCall { name, arguments });
     }
 
     let re = Regex::new(
         r#"(?i)\{"arguments":\s*(?P<arguments>\{.*\}),\s*"name":\s*"(?P<name>[^"]+)"\}"#,
     )?;
+
     if let Some(caps) = re.captures(input) {
-        let arguments_str = caps
-            .name("arguments")
-            .ok_or(ExtractError::NoArguments)?
-            .as_str()
-            .to_string();
-        let name = caps
-            .name("name")
-            .ok_or(ExtractError::NoName)?
-            .as_str()
-            .to_string();
-        return Ok(JsonStr::ToolCall(ToolCall {
-            name,
-            arguments: Some(arguments_str),
-        }));
+        return Ok(ToolCall {
+            name: caps
+                .name("name")
+                .ok_or(ExtractError::NoName)?
+                .as_str()
+                .to_string(),
+            arguments: Some(
+                caps.name("arguments")
+                    .ok_or(ExtractError::NoArguments)?
+                    .as_str()
+                    .to_string(),
+            ),
+        });
     }
+
     Err(ExtractError::InvalidInput.into())
 }
 
@@ -186,36 +176,27 @@ pub fn parse_next_move_and_(
     (&continue_or_terminate == "TERMINATE", next_move, key_points)
 }
 
-pub fn parse_planning_sub_tasks(input: &str) -> (Vec<String>, String, String) {
-    let sub_tasks_regex = Regex::new(r#""sub_tasks":\s*(\[[^\]]*\])"#).unwrap();
-    let sub_tasks_str = sub_tasks_regex
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct PlanningTask {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub tool: Option<String>,
+}
+
+pub fn parse_planning_tasks(input: &str) -> Result<Vec<PlanningTask>> {
+    let tasks_regex =
+        Regex::new(r#""tasks":\s*(\[[^\]]*\])"#).context("Failed to create tasks regex")?;
+
+    let tasks_str = tasks_regex
         .captures(input)
         .and_then(|cap| cap.get(1))
-        .map_or(String::new(), |m| m.as_str().to_string());
+        .map(|m| m.as_str())
+        .ok_or_else(|| anyhow!("Failed to find tasks array in input"))?;
 
-    let solution_found_regex = Regex::new(r#""solution_found":\s*"([^"]*)""#).unwrap();
-    let solution_found = solution_found_regex
-        .captures(input)
-        .and_then(|cap| cap.get(1))
-        .map_or(String::new(), |m| m.as_str().to_string());
+    let parsed_tasks: Vec<PlanningTask> =
+        serde_json::from_str(tasks_str).context("Failed to parse tasks JSON")?;
 
-    if sub_tasks_str.is_empty() {
-        eprintln!("Failed to extract 'sub_tasks' from input.");
-        return (vec![], input.to_string(), solution_found);
-    }
-    let task_summary_regex = Regex::new(r#""task_summary":\s*"([^"]*)""#).unwrap();
-    let task_summary = task_summary_regex
-        .captures(input)
-        .and_then(|cap| cap.get(1))
-        .map_or(String::new(), |m| m.as_str().to_string());
-
-    let parsed_sub_tasks: Vec<String> = match serde_json::from_str(&sub_tasks_str) {
-        Ok(val) => val,
-        Err(_) => {
-            eprintln!("Failed to parse extracted 'sub_tasks' as JSON.");
-            return (vec![], task_summary, solution_found);
-        }
-    };
-
-    (parsed_sub_tasks, task_summary, solution_found)
+    Ok(parsed_tasks)
 }
