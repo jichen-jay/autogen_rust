@@ -2,7 +2,7 @@ use crate::agent_runtime::{agent::AgentActor, AgentId, TopicId};
 use crate::llama::{
     chat_inner_async_wrapper,
     llama_utils::{extract_json_from_xml_like, extract_tool_call_json, parse_planning_tasks},
-    Content, JsonStr, LlamaResponseError, LlamaResponseMessage,
+    Content, LlamaResponseError, LlamaResponseMessage, StructuredText,
 };
 use crate::{
     FormatterFn, LlmConfig, STORE, TEMPLATE_SYSTEM_PROMPT_PLANNER, TEMPLATE_SYSTEM_PROMPT_TOOL_USE,
@@ -207,25 +207,19 @@ impl LlmAgent {
                     total_tokens: 0,
                 };
 
-                let chat_response =
+                let (chat_response_text, usage) =
                     chat_inner_async_wrapper(config, &self.system_prompt, &user_prompt, max_token)
                         .await?;
 
-                let usage = chat_response.usage.unwrap_or(default_usage.clone());
-                let choice = chat_response.choices.first().ok_or(Err(anyhow::Error::msg(
-                    "empty choices in ChatResponse".to_string(),
-                )));
-                let msg_obj = &choice.unwrap().message;
-
-                let role = msg_obj.role.clone();
-                let data = msg_obj.content.as_ref()?;
+                let role = Role::Assistant;
 
                 let content = match self.task_type {
-                    TaskOutput::text => Content::Text(data.to_string()),
+                    TaskOutput::text => Content::Text(chat_response_text.to_string()),
                     TaskOutput::tool_call => {
-                        let json_str = extract_json_from_xml_like(data).map_err(|e| {
-                            Box::new(LlamaResponseError::JsonExtractionError(e.to_string()))
-                        })?;
+                        let json_str =
+                            extract_json_from_xml_like(&chat_response_text).map_err(|e| {
+                                Box::new(LlamaResponseError::JsonExtractionError(e.to_string()))
+                            })?;
                         let pretty_json = jsonxf::pretty_print(&json_str).map_err(|e| {
                             Box::new(LlamaResponseError::JsonFormatError(e.to_string()))
                         })?;
@@ -273,18 +267,14 @@ impl LlmAgent {
                         }
                     }
                     TaskOutput::plan => {
-                        let tasks = parse_planning_tasks(data).map_err(|e| {
+                        let tasks = parse_planning_tasks(&chat_response_text).map_err(|e| {
                             LlamaResponseError::ToolCallParseError(format!(
                                 "Failed to parse planning tasks: {}",
                                 e
                             ))
                         })?;
 
-                        let planning_data = json!({
-                            "tasks": tasks
-                        });
-
-                        Content::JsonStr(JsonStr::JsonLoad(planning_data))
+                        Content::Structured(StructuredText::Tasks(tasks))
                     }
                 };
 

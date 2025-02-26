@@ -6,7 +6,7 @@ use async_openai::types::Role;
 use autogen_rust::agent_runtime::{
     agent::{AgentActor, AgentState},
     router::{RouterActor, RouterState, RouterStatus},
-    ActorContext, AgentId, MessageContext, RouterCommand, SpawnLlamaResponseMessage, TopicId,
+    ActorContext, AgentId, MessageContext, RouterCommand,  TopicId,
 };
 use autogen_rust::llama::*;
 use autogen_rust::FormatterWrapper;

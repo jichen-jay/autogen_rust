@@ -7,7 +7,7 @@ use async_openai::types::{CompletionUsage, CreateChatCompletionResponse, Role};
 use autogen_rust::agent_runtime::{
     agent::{AgentActor, AgentState},
     router::{RouterActor, RouterState, RouterStatus},
-    ActorContext, AgentId, MessageContext, RouterCommand, SpawnLlamaResponseMessage, TopicId,
+    ActorContext, AgentId, MessageContext, RouterCommand, TopicId,
 };
 use autogen_rust::{immutable_agent::*, llama::*, FormatterWrapper, LlmConfig};
 use autogen_rust::{
@@ -134,45 +134,30 @@ async fn main() -> Result<()> {
     println!("user_prompt:\n {}\n\n", pretty_json);
 
     match chat_inner_async_wrapper(&TOGETHER_CONFIG, system_prompt, &user_prompt, max_token).await {
-        Ok(res) => match res.content {
-            Content::Text(tex) => {
-                println!("I'm inside the chat Text branch");
-                llama_response = tex;
-            }
-            Content::JsonStr(JsonStr::ToolCall(tc)) => {
-                println!("I'm inside the chat JsonStr branch");
+        Ok((res, usage)) => {
+            todo!()
+            // let func_name = tc.name.clone();
 
-                usage = res.usage;
-                let func_name = tc.name.clone();
+            // let args_value = tc.arguments.unwrap_or(String::new());
 
-                let args_value = tc.arguments.unwrap_or(String::new());
+            // let binding = STORE.lock().unwrap();
+            // if let Some(tool) = binding.get(&func_name) {
+            //     match tool.run(args_value) {
+            //         Ok(tool_output) => {
+            //             println!("function_call result: {}", tool_output.clone());
 
-                let binding = STORE.lock().unwrap();
-                if let Some(tool) = binding.get(&func_name) {
-                    match tool.run(args_value) {
-                        Ok(tool_output) => {
-                            println!("function_call result: {}", tool_output.clone());
-
-                            llama_response = tool_output;
-                        }
-                        Err(e) => {
-                            eprintln!("Error executing tool {}: {}", func_name, e);
-                            llama_response = format!("Error executing tool {}: {}", func_name, e);
-                        }
-                    }
-                } else {
-                    eprintln!("Tool {} not found in STORE", func_name);
-                    llama_response = format!("Tool {} not found", func_name);
-                }
-            }
-            Content::JsonStr(JsonStr::JsonLoad(jl)) => {
-                println!("I'm inside the chat JsonStr branch");
-
-                usage = res.usage;
-
-                todo!()
-            }
-        },
+            //             llama_response = tool_output;
+            //         }
+            //         Err(e) => {
+            //             eprintln!("Error executing tool {}: {}", func_name, e);
+            //             llama_response = format!("Error executing tool {}: {}", func_name, e);
+            //         }
+            //     }
+            // } else {
+            //     eprintln!("Tool {} not found in STORE", func_name);
+            //     llama_response = format!("Tool {} not found", func_name);
+            // }
+        }
         Err(e) => {
             eprintln!("Error in chat_inner_async_wrapper: {}", e);
             llama_response = "Failed to get a response from the chat system".to_string();
