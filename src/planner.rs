@@ -11,7 +11,9 @@ use autogen_rust::agent_runtime::{
 use autogen_rust::llama::*;
 use autogen_rust::FormatterWrapper;
 use autogen_rust::{immutable_agent::*, llama::Content};
-use autogen_rust::{TEMPLATE_SYSTEM_PROMPT_TOOL_USE, TEMPLATE_USER_PROMPT_TOOL_USE};
+use autogen_rust::{
+    TEMPLATE_SYSTEM_PROMPT_PLANNER, TEMPLATE_SYSTEM_PROMPT_TOOL_USE, TEMPLATE_USER_PROMPT_TASK_JSON,
+};
 use env_logger;
 use ractor::{call_t, rpc::CallResult, spawn_named, Actor, ActorCell, ActorRef, RpcReplyPort};
 use serde_json::{json, Value};
@@ -33,7 +35,7 @@ async fn main() -> Result<()> {
 
     router_ref.cast(RouterCommand::Ready)?;
 
-    // let task_agent_id = spawn_agent(
+    // let planner_agent_id = spawn_agent(
     //     router_ref.clone(),
     //     "You're an AI assistant".to_string(),
     //     TopicId::from("chat"),
@@ -41,81 +43,18 @@ async fn main() -> Result<()> {
     // )
     // .await?;
 
-    let description = "tool use agent".to_string();
-    let tools_map_meta = json!([{
-            "type": "function",
-            "function": {
-            "name": "get_current_weather",
-            "description": "Get the current weather in a given location",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {
-                        "type": "string",
-                        "description": "The city and state, e.g. San Francisco, CA"
-                    },
-                    "unit": {
-                        "type": "string",
-                        "enum": ["celsius", "fahrenheit"],
-                        "description": "The temperature unit to use. Infer this from the users location."
-                    }
-                },
-                "required": ["location", "unit"]
-            }
-        }
-    },
-    {
-            "type": "function",
-            "function": {
-            "name": "get_user_feedback",
-            "description": "Get user's input in terminal",
-            "parameters": {},
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-    "name": "process_values",
-    "description": "Processes up to 5 different types of values",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "a": {
-                "type": "i32",
-                "description": "An integer value"
-            },
-            "b": {
-                "type": "f32",
-                "description": "A floating-point value"
-            },
-            "c": {
-                "type": "bool",
-                "description": "A boolean value"
-            },
-            "d": {
-                "type": "string",
-                "description": "A string value"
-            },
-            "e": {
-                "type": "i32",
-                "description": "Another integer value"
-            }
-        },
-        "required": ["a", "b", "c", "d", "e"]
-    }
-    }
-    }]);
+    let description = "planner agent".to_string();
 
-    let task_agent_id = spawn_agent(
+    let planner_agent_id = spawn_agent(
         router_ref.clone(),
-        TEMPLATE_SYSTEM_PROMPT_TOOL_USE.to_string(),
-        Some(TEMPLATE_USER_PROMPT_TOOL_USE.clone()),
+        TEMPLATE_SYSTEM_PROMPT_PLANNER.to_string(),
+        Some(TEMPLATE_USER_PROMPT_TASK_JSON.clone()),
         TopicId::from("chat"),
-        Some(tools_map_meta),
+        None,
         description,
     )
     .await?;
-    println!("Task agent id: {}", task_agent_id);
+    println!("Task agent id: {}", planner_agent_id);
 
     time::sleep(std::time::Duration::from_secs(1)).await;
     let temp_agent_id = Uuid::new_v4();
@@ -141,8 +80,7 @@ async fn main() -> Result<()> {
 
     let task_message = Message::new(
         Content::Text(
-            "<|im_start|>get user's instruction in terminal<|im_end|>".to_string(),
-            // "<|im_start|>user Fetch the weather of New York in Celsius unit<|im_end|>".to_string(),
+            "<|im_start|>how to build a 30W music amplifier<|im_end|>".to_string(),
         ),
         None,
         Role::User,
@@ -164,7 +102,7 @@ async fn main() -> Result<()> {
     time::sleep(Duration::from_secs(5)).await;
 
     router_ref.cast(RouterCommand::ShutdownAgent {
-        agent_id: task_agent_id,
+        agent_id: planner_agent_id,
     })?;
     // router_ref.cast(RouterCommand::ShutdownAgent {
     //     agent_id: user_proxy_agent_id,

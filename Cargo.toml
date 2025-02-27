@@ -12,6 +12,10 @@ crate-type = ["lib"]
 path = "src/tester.rs"
 name = "tester"
 
+[[bin]]
+path = "src/planner.rs"
+name = "planner"
+
 [dependencies]
 anyhow = "1"
 tool-builder = { path = "./tool-builder" }
@@ -51,6 +55,7 @@ lazy_static = "1.5.0"
 jsonxf = "1.1.1"
 thiserror = "2.0.11"
 escape8259 = "0.5.3"
+tryhard = "0.5.1"
 
 
 # [workspace]

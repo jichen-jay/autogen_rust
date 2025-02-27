@@ -79,7 +79,6 @@ pub enum RouterCommand {
         reply_to: RpcReplyPort<SpawnAgentResponse>,
         tools_map_meta: Option<Value>,
         description: String,
-        task_type: TaskOutput,
     },
 }
 
@@ -120,7 +119,6 @@ impl std::fmt::Debug for RouterCommand {
                 topic,
                 tools_map_meta,
                 description,
-                task_type,
                 reply_to,
             } => {
                 f.debug_struct("SpawnAgent")

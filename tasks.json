@@ -1,0 +1,18 @@
+[
+    { name: "Research Amplifier Circuit", description: "Identify a suitable 30W amplifier circuit design. Consider factors like efficiency, components availability, and complexity.", tool: None
+    },
+    { name: "Gather Component List", description: "Compile a complete list of all electronic components required for the chosen circuit.", tool: None
+    },
+    { name: "Source Components", description: "Procure all necessary electronic components from suppliers.", tool: None
+    },
+    { name: "Prepare PCB or Prototype", description: "Create a printed circuit board (PCB) layout or assemble a prototype using a breadboard.", tool: None
+    },
+    { name: "Solder Components", description: "Carefully solder all components onto the PCB or breadboard according to the circuit diagram.", tool: Some("Soldering Iron")
+    },
+    { name: "Test Circuit Functionality", description: "Use a multimeter and oscilloscope to verify the circuit's functionality and identify any issues.", tool: Some("Multimeter, Oscilloscope")
+    },
+    { name: "Enclosure and Wiring", description: "Build a suitable enclosure for the amplifier and connect the necessary input and output wiring.", tool: None
+    },
+    { name: "Final Testing and Adjustments", description: "Conduct final testing of the amplifier, making any necessary adjustments to performance.", tool: Some("Audio Signal Generator, Speaker")
+    }
+]

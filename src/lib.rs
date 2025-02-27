@@ -55,12 +55,7 @@ pub static ref TEMPLATE_USER_PROMPT_TOOL_USE: Arc<Mutex<FormatterFn>> =
         )
     })));
 
-    pub static ref TEMPLATE_SYSTEM_PROMPT_PLANNER: Arc<Mutex<FormatterFn>> = Arc::new(Mutex::new(
-        Box::new(|args: &[&str]| {
-            format!(
-        "You are a precise project planning assistant that breaks down projects into structured task lists.
-
-        Available tools: {}
+    pub static ref TEMPLATE_SYSTEM_PROMPT_PLANNER:  &'static str  = "You are a precise project planning assistant that breaks down projects into structured task lists.
 
         PLANNING RULES:
         - Break down tasks into one level of subtasks only (no nested subtasks)
@@ -73,21 +68,19 @@ pub static ref TEMPLATE_USER_PROMPT_TOOL_USE: Arc<Mutex<FormatterFn>> =
         - Analyze projects to identify logical components
         - Create structured, sequential task breakdowns
         - Always return valid JSON in the exact format requested
-        - Focus on practical, implementable task divisions",
-        args[0]
-    )
-        })
-    ));
+        - Focus on practical, implementable task divisions";
+    
     pub static ref TEMPLATE_USER_PROMPT_TASK_JSON: Arc<Mutex<FormatterFn>> =
         Arc::new(Mutex::new(Box::new(|args: &[&str]| {
             format!(
                 "Break down this project into subtasks: {}
 
+        Available tools: {}
+
         Return your response as valid JSON with this structure:
         {{
           \"tasks\": [
             {{
-              \"id\": \"task-1\",
               \"name\": \"[Short descriptive name]\",
               \"description\": \"[Detailed explanation]\",
               \"tool\": \"[tool_name or null if no specific tool]\",
@@ -102,7 +95,7 @@ pub static ref TEMPLATE_USER_PROMPT_TOOL_USE: Arc<Mutex<FormatterFn>> =
         - The \"tool\" field should reference an available tool when applicable, or null
         - Each task MUST include all fields shown above
         - Keep the breakdown flat (one level only, no nested subtasks)",
-                args[0]
+                args[0], args[1]
             )
         })));
 }

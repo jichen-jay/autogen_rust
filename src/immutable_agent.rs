@@ -2,7 +2,7 @@ use crate::agent_runtime::{agent::AgentActor, AgentId, TopicId};
 use crate::llama::{
     chat_inner_async_wrapper,
     llama_utils::{extract_json_from_xml_like, extract_tool_call_json, parse_planning_tasks},
-    Content, LlamaResponseError, LlamaResponseMessage, StructuredText,
+    Content, LlamaResponseError, LlamaResponseMessage, StructuredText, Task, ToolCall,
 };
 use crate::{
     FormatterFn, LlmConfig, STORE, TEMPLATE_SYSTEM_PROMPT_PLANNER, TEMPLATE_SYSTEM_PROMPT_TOOL_USE,
@@ -18,6 +18,7 @@ use serde_json::json;
 use serde_json::{Error as SerdeError, Value};
 use std::collections::HashMap;
 use std::error::Error as StdError;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use thiserror::Error;
 use tokio::io::{stdin, AsyncBufReadExt, BufReader};
@@ -59,7 +60,6 @@ pub struct LlmAgent {
     pub tools_map_meta: Option<Value>,
     pub description: String,
     tool_names: Vec<String>,
-    task_type: TaskOutput,
 }
 
 #[derive(Debug, Error)]
@@ -74,7 +74,7 @@ pub enum BuilderError {
 pub enum TaskOutput {
     text,
     tool_call,
-    plan,
+    tasks,
 }
 
 impl LlmAgent {
@@ -86,7 +86,6 @@ impl LlmAgent {
         llm_config: Option<LlmConfig>,
         tools_map_meta: Option<Value>,
         description: String,
-        task_type: TaskOutput,
     ) -> Result<Self, BuilderError> {
         let (system_prompt, tool_names) = match tools_map_meta.as_ref() {
             Some(tools_meta) => {
@@ -129,7 +128,6 @@ impl LlmAgent {
             description,
             tools_map_meta,
             tool_names,
-            task_type,
         })
     }
 
@@ -137,7 +135,7 @@ impl LlmAgent {
         println!("default_method: received input: {:?}", input);
 
         let tool_names = self.tool_names.clone();
-        println!("length of tool_names: {:?}", tool_names.len());
+        println!("tool_names: {:?}", tool_names.clone());
 
         let default_usage = CompletionUsage {
             prompt_tokens: 0,
@@ -145,145 +143,142 @@ impl LlmAgent {
             total_tokens: 0,
         };
 
-        match tool_names.len() {
-            // 0 => {
-            //     let user_prompt = match &self.user_prompt_formatter {
-            //         None => format!("here is your task: {}", input),
+        if tool_names
+            .first()
+            .map(|name| name == "get_user_feedback")
+            .unwrap_or(false)
+        {
+            let store = STORE.lock().unwrap();
+            let tool = store
+                .get("get_user_feedback")
+                .expect("get_user_feedback not found in store");
+            let output = tool.run(String::new()).expect("tool execution failed");
+            return Ok(LlamaResponseMessage {
+                content: Content::Text(output.to_string()),
+                role: Role::Assistant,
+                usage: default_usage,
+            });
+        }
 
-            //         Some(f) => {
-            //             let formatter = f.lock().unwrap();
+        let task_type = if self.user_prompt_formatter.is_some()
+            && self.description.to_lowercase().contains("plan")
+        {
+            TaskOutput::tasks
+        } else if !tool_names.is_empty() {
+            TaskOutput::tool_call
+        } else {
+            TaskOutput::text
+        };
 
-            //             formatter(&[&input])
-            //         }
-            //     };
+        let user_prompt = match &self.user_prompt_formatter {
+            None => format!("here is your task: {}", input),
+            Some(f) => {
+                let formatter = f.lock().unwrap();
+                formatter(&[
+                    &input,
+                    &self
+                        .tools_map_meta
+                        .clone()
+                        .unwrap_or(Value::String(String::new()))
+                        .to_string(),
+                ])
+            }
+        };
 
-            //     let max_token = 1000u16;
-            //     let chat_response = chat_inner_async_wrapper(
-            //         &TOGETHER_CONFIG,
-            //         &self.system_prompt,
-            //         &user_prompt,
-            //         max_token,
-            //     )
-            //     .await?;
+        let max_token = 1000u16;
 
-            //     let llama_response: LlamaResponseMessage = output_response_by_task(&chat_response)?;
-
-            //     Ok(llama_response)
-            // }
-            1 if tool_names[0] == "get_user_feedback" => {
-                let store = STORE.lock().unwrap();
-                let tool = store
-                    .get("get_user_feedback")
-                    .expect("get_user_feedback not found in store");
-
-                let output = tool.run(String::new()).expect("tool execution failed");
-
-                let content = Content::Text(output.to_string());
-
+        match task_type {
+            TaskOutput::text => {
+                let (response_text, usage) = chat_inner_async_wrapper(
+                    &TOGETHER_CONFIG,
+                    &self.system_prompt,
+                    &user_prompt,
+                    max_token,
+                )
+                .await?;
                 Ok(LlamaResponseMessage {
-                    content: content,
+                    content: Content::Text(response_text),
                     role: Role::Assistant,
-                    usage: default_usage.clone(),
+                    usage,
                 })
             }
-            _ => {
-                let user_prompt = match &self.user_prompt_formatter {
-                    None => format!("here is your task: {}", input),
-
-                    Some(f) => {
-                        let formatter = f.lock().unwrap();
-
-                        formatter(&[&input])
-                    }
-                };
-
-                let max_token = 1000u16;
+            //merge the next 2 arms to simplify logic
+            TaskOutput::tasks => {
                 let config = self.llm_config.as_ref().unwrap_or(&TOGETHER_CONFIG);
 
-                let mut llama_response = String::new();
-                let mut usage = CompletionUsage {
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    total_tokens: 0,
-                };
+                let (response_text, usage, tasks) = tryhard::retry_fn(|| async {
+                    let (resp, usage) = chat_inner_async_wrapper(
+                        config,
+                        &self.system_prompt,
+                        &user_prompt,
+                        max_token,
+                    )
+                    .await?;
+                    let tasks = parse_planning_tasks(&resp)
+                        .map_err(|e| anyhow::anyhow!("Failed to parse planning tasks: {:?}", e))?;
+                    Ok::<(String, CompletionUsage, Vec<Task>), anyhow::Error>((resp, usage, tasks))
+                })
+                .retries(2)
+                .await?;
 
-                let (chat_response_text, usage) =
-                    chat_inner_async_wrapper(config, &self.system_prompt, &user_prompt, max_token)
-                        .await?;
+                Ok(LlamaResponseMessage {
+                    content: Content::Structured(StructuredText::Tasks(tasks)),
+                    role: Role::Assistant,
+                    usage,
+                })
+            }
+            TaskOutput::tool_call => {
+                let config = self.llm_config.as_ref().unwrap_or(&TOGETHER_CONFIG);
 
-                let role = Role::Assistant;
+                let attempt = AtomicUsize::new(0);
+                let (chat_response_text, usage, tool_call) = tryhard::retry_fn(|| async {
+                    let count = attempt.fetch_add(1, Ordering::Relaxed) + 1;
+                    println!("Attempt number: {}", count);
+                    let (rsp, usage) = chat_inner_async_wrapper(
+                        config,
+                        &self.system_prompt,
+                        &user_prompt,
+                        max_token,
+                    )
+                    .await?;
+                    let json_str = extract_json_from_xml_like(&rsp)
+                        .map_err(|e| LlamaResponseError::JsonExtractionError(e.to_string()))?;
+                    let tool_call = extract_tool_call_json(&json_str)
+                        .map_err(|e| LlamaResponseError::ToolCallParseError(e.to_string()))?;
+                    Ok::<(String, CompletionUsage, ToolCall), anyhow::Error>((
+                        rsp, usage, tool_call,
+                    ))
+                })
+                .retries(2)
+                .await?;
 
-                let content = match self.task_type {
-                    TaskOutput::text => Content::Text(chat_response_text.to_string()),
-                    TaskOutput::tool_call => {
-                        let json_str =
-                            extract_json_from_xml_like(&chat_response_text).map_err(|e| {
-                                Box::new(LlamaResponseError::JsonExtractionError(e.to_string()))
-                            })?;
-                        let pretty_json = jsonxf::pretty_print(&json_str).map_err(|e| {
-                            Box::new(LlamaResponseError::JsonFormatError(e.to_string()))
-                        })?;
-                        println!("JSON Output:\n{}\n", pretty_json);
-
-                        match extract_tool_call_json(&json_str) {
-                            Ok(tc) => {
-                                println!("I'm inside the chat JsonStr branch");
-
-                                let func_name = tc.name.clone();
-
-                                let args_value = tc.arguments.unwrap_or(String::new());
-
-                                let binding = STORE.lock().unwrap();
-                                let mut tc_result = String::new();
-                                if let Some(tool) = binding.get(&func_name) {
-                                    match tool.run(args_value) {
-                                        Ok(tool_output) => {
-                                            println!(
-                                                "function_call result: {}",
-                                                tool_output.clone()
-                                            );
-
-                                            tc_result = tool_output;
-                                        }
-                                        Err(e) => {
-                                            eprintln!("Error executing tool {}: {}", func_name, e);
-                                            tc_result = format!(
-                                                "Error executing tool {}: {}",
-                                                func_name, e
-                                            );
-                                        }
-                                    }
-                                } else {
-                                    eprintln!("Tool {} not found in STORE", func_name);
-                                    tc_result = format!("Tool {} not found", func_name);
-                                }
-
-                                Content::Text(tc_result)
+                // Run the extracted tool call.
+                let tool_content = {
+                    let func_name = tool_call.name.clone();
+                    let args_value = tool_call.arguments.unwrap_or_else(String::new);
+                    let binding = STORE.lock().unwrap();
+                    if let Some(tool) = binding.get(&func_name) {
+                        match tool.run(args_value) {
+                            Ok(tool_output) => {
+                                println!("function_call result: {}", tool_output);
+                                Content::Text(tool_output)
                             }
                             Err(e) => {
-                                log::warn!("Tool call parse error, falling back to text: {}", e);
-                                Content::Text(json_str.to_string())
+                                eprintln!("Error executing tool {}: {}", func_name, e);
+                                Content::Text(format!("Error executing tool {}: {}", func_name, e))
                             }
                         }
-                    }
-                    TaskOutput::plan => {
-                        let tasks = parse_planning_tasks(&chat_response_text).map_err(|e| {
-                            LlamaResponseError::ToolCallParseError(format!(
-                                "Failed to parse planning tasks: {}",
-                                e
-                            ))
-                        })?;
-
-                        Content::Structured(StructuredText::Tasks(tasks))
+                    } else {
+                        eprintln!("Tool {} not found in STORE", func_name);
+                        Content::Text(format!("Tool {} not found", func_name))
                     }
                 };
 
-                let wrapped_response = LlamaResponseMessage {
-                    content: content,
+                Ok(LlamaResponseMessage {
+                    content: tool_content,
                     role: Role::Assistant,
-                    usage: usage,
-                };
-                Ok(wrapped_response)
+                    usage,
+                })
             }
         }
     }
