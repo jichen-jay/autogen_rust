@@ -18,6 +18,7 @@ use serde_json::json;
 use serde_json::{Error as SerdeError, Value};
 use std::collections::HashMap;
 use std::error::Error as StdError;
+use std::result::Result as StdResult;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use thiserror::Error;
@@ -52,6 +53,33 @@ impl Message {
     }
 }
 
+#[derive(Debug, Error)]
+pub enum BuilderError {
+    #[error("Failed to serialize tools metadata: {0}")]
+    MetaSerializationFailure(#[from] SerdeError),
+
+    #[error("Tool name not found in metadata at index {index}: {data}")]
+    ToolNameNotFound { index: usize, data: String },
+}
+
+#[derive(Error, Debug)]
+pub enum DefaultMethodError {
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
+
+    #[error("LLM API error: {0}")]
+    LlmApiError(String),
+
+    #[error("Tool execution error: {0}")]
+    ToolExecutionError(String),
+
+    #[error("Parsing error: {0}")]
+    ParsingError(String),
+
+    #[error("Tool not found: {0}")]
+    ToolNotFound(String),
+}
+
 #[derive(Clone)]
 pub struct LlmAgent {
     pub system_prompt: String,
@@ -62,31 +90,14 @@ pub struct LlmAgent {
     tool_names: Vec<String>,
 }
 
-#[derive(Debug, Error)]
-pub enum BuilderError {
-    #[error("Failed to serialize tools metadata: {0}")]
-    MetaSerializationFailure(#[from] SerdeError),
-
-    #[error("Tool name not found in metadata at index {index}: {data}")]
-    ToolNameNotFound { index: usize, data: String },
-}
-#[derive(Clone)]
-pub enum TaskOutput {
-    text,
-    tool_call,
-    tasks,
-}
-
 impl LlmAgent {
-    //am considering is add a user prompt formatter function in this method
-    //or should I keep the formatter function as a field of agent struct
     pub fn build(
         system_prompt: String,
         user_prompt_formatter: Option<Arc<Mutex<FormatterFn>>>,
         llm_config: Option<LlmConfig>,
         tools_map_meta: Option<Value>,
         description: String,
-    ) -> Result<Self, BuilderError> {
+    ) -> StdResult<Self, BuilderError> {
         let (system_prompt, tool_names) = match tools_map_meta.as_ref() {
             Some(tools_meta) => {
                 let formatted_prompt = TEMPLATE_SYSTEM_PROMPT_TOOL_USE.to_string();
@@ -131,11 +142,19 @@ impl LlmAgent {
         })
     }
 
-    pub async fn default_method(&self, input: &str) -> anyhow::Result<LlamaResponseMessage> {
-        println!("default_method: received input: {:?}", input);
+    pub async fn default_method(
+        &self,
+        input: &str,
+    ) -> StdResult<LlamaResponseMessage, DefaultMethodError> {
+        enum TaskOutput {
+            text,
+            tool_call,
+            tasks,
+        }
+        println!("default_method: received input\n: {:?}\n", input);
 
         let tool_names = self.tool_names.clone();
-        println!("tool_names: {:?}", tool_names.clone());
+        println!("tool_names: {:?}\n", tool_names.clone());
 
         let default_usage = CompletionUsage {
             prompt_tokens: 0,
@@ -152,7 +171,10 @@ impl LlmAgent {
             let tool = store
                 .get("get_user_feedback")
                 .expect("get_user_feedback not found in store");
-            let output = tool.run(String::new()).expect("tool execution failed");
+            let output = tool
+                .run(String::new())
+                .map_err(|e| DefaultMethodError::ToolExecutionError(e.to_string()))?;
+
             return Ok(LlamaResponseMessage {
                 content: Content::Text(output.to_string()),
                 role: Role::Assistant,
@@ -186,77 +208,41 @@ impl LlmAgent {
         };
 
         let max_token = 1000u16;
+        let config = self.llm_config.as_ref().unwrap_or(&TOGETHER_CONFIG);
+        let attempt = AtomicUsize::new(0);
 
-        match task_type {
-            TaskOutput::text => {
-                let (response_text, usage) = chat_inner_async_wrapper(
-                    &TOGETHER_CONFIG,
-                    &self.system_prompt,
-                    &user_prompt,
-                    max_token,
-                )
-                .await?;
-                Ok(LlamaResponseMessage {
-                    content: Content::Text(response_text),
-                    role: Role::Assistant,
-                    usage,
-                })
-            }
-            //merge the next 2 arms to simplify logic
-            TaskOutput::tasks => {
-                let config = self.llm_config.as_ref().unwrap_or(&TOGETHER_CONFIG);
+        let result = tryhard::retry_fn(|| async {
+            let count = attempt.fetch_add(1, Ordering::Relaxed) + 1;
+            println!("Attempt number: {}", count);
 
-                let (response_text, usage, tasks) = tryhard::retry_fn(|| async {
-                    let (resp, usage) = chat_inner_async_wrapper(
-                        config,
-                        &self.system_prompt,
-                        &user_prompt,
-                        max_token,
-                    )
-                    .await?;
-                    let tasks = parse_planning_tasks(&resp)
-                        .map_err(|e| anyhow::anyhow!("Failed to parse planning tasks: {:?}", e))?;
-                    Ok::<(String, CompletionUsage, Vec<Task>), anyhow::Error>((resp, usage, tasks))
-                })
-                .retries(2)
-                .await?;
+            let (resp, usage) =
+                chat_inner_async_wrapper(config, &self.system_prompt, &user_prompt, max_token)
+                    .await
+                    .map_err(|e| DefaultMethodError::LlmApiError(e.to_string()))?;
 
-                Ok(LlamaResponseMessage {
-                    content: Content::Structured(StructuredText::Tasks(tasks)),
-                    role: Role::Assistant,
-                    usage,
-                })
-            }
-            TaskOutput::tool_call => {
-                let config = self.llm_config.as_ref().unwrap_or(&TOGETHER_CONFIG);
+            let content = match task_type {
+                TaskOutput::text => Content::Text(resp.clone()),
+                TaskOutput::tasks => {
+                    let tasks = parse_planning_tasks(&resp).map_err(|e| {
+                        DefaultMethodError::ParsingError(format!(
+                            "Failed to parse planning tasks: {:?}",
+                            e
+                        ))
+                    })?;
+                    Content::Structured(StructuredText::Tasks(tasks))
+                }
+                TaskOutput::tool_call => {
+                    let json_str = extract_json_from_xml_like(&resp).map_err(|e| {
+                        DefaultMethodError::ParsingError(format!("JSON extraction error: {}", e))
+                    })?;
+                    let tool_call = extract_tool_call_json(&json_str).map_err(|e| {
+                        DefaultMethodError::ParsingError(format!("Tool call parse error: {}", e))
+                    })?;
 
-                let attempt = AtomicUsize::new(0);
-                let (chat_response_text, usage, tool_call) = tryhard::retry_fn(|| async {
-                    let count = attempt.fetch_add(1, Ordering::Relaxed) + 1;
-                    println!("Attempt number: {}", count);
-                    let (rsp, usage) = chat_inner_async_wrapper(
-                        config,
-                        &self.system_prompt,
-                        &user_prompt,
-                        max_token,
-                    )
-                    .await?;
-                    let json_str = extract_json_from_xml_like(&rsp)
-                        .map_err(|e| LlamaResponseError::JsonExtractionError(e.to_string()))?;
-                    let tool_call = extract_tool_call_json(&json_str)
-                        .map_err(|e| LlamaResponseError::ToolCallParseError(e.to_string()))?;
-                    Ok::<(String, CompletionUsage, ToolCall), anyhow::Error>((
-                        rsp, usage, tool_call,
-                    ))
-                })
-                .retries(2)
-                .await?;
-
-                // Run the extracted tool call.
-                let tool_content = {
                     let func_name = tool_call.name.clone();
                     let args_value = tool_call.arguments.unwrap_or_else(String::new);
                     let binding = STORE.lock().unwrap();
+
                     if let Some(tool) = binding.get(&func_name) {
                         match tool.run(args_value) {
                             Ok(tool_output) => {
@@ -264,22 +250,31 @@ impl LlmAgent {
                                 Content::Text(tool_output)
                             }
                             Err(e) => {
-                                eprintln!("Error executing tool {}: {}", func_name, e);
-                                Content::Text(format!("Error executing tool {}: {}", func_name, e))
+                                let error_msg =
+                                    format!("Error executing tool {}: {}", func_name, e);
+                                eprintln!("{}", error_msg);
+                                return Err(DefaultMethodError::ToolExecutionError(error_msg));
                             }
                         }
                     } else {
-                        eprintln!("Tool {} not found in STORE", func_name);
-                        Content::Text(format!("Tool {} not found", func_name))
+                        let error_msg = format!("Tool {} not found", func_name);
+                        eprintln!("{}", error_msg);
+                        return Err(DefaultMethodError::ToolNotFound(error_msg));
                     }
-                };
+                }
+            };
 
-                Ok(LlamaResponseMessage {
-                    content: tool_content,
-                    role: Role::Assistant,
-                    usage,
-                })
-            }
-        }
+            Ok((resp, usage, content))
+        })
+        .retries(2)
+        .await?;
+
+        let (_, usage, content) = result;
+
+        Ok(LlamaResponseMessage {
+            content,
+            role: Role::Assistant,
+            usage,
+        })
     }
 }

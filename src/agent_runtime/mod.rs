@@ -1,7 +1,7 @@
 pub mod agent;
 pub mod router;
 
-use crate::immutable_agent::{LlmAgent, Message, TaskOutput};
+use crate::immutable_agent::{LlmAgent, Message};
 use crate::FormatterWrapper;
 use ractor::{ActorRef, RpcReplyPort};
 use serde_json::Value;

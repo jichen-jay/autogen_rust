@@ -2,7 +2,7 @@ use crate::agent_runtime::{
     agent::{AgentActor, AgentState},
     ActorContext, AgentId, RouterCommand, SpawnAgentResponse, TopicId,
 };
-use crate::immutable_agent::{LlmAgent, Message, TaskOutput};
+use crate::immutable_agent::{LlmAgent, Message};
 use crate::FormatterWrapper;
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef};
 use serde_json::Value;
