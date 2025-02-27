@@ -2,8 +2,6 @@ use crate::llama::{
     LlamaResponseError, LlamaResponseMessage, ParseError, StructuredText, Task, ToolCall,
 };
 use crate::LlmConfig;
-use anyhow::Context;
-use anyhow::{anyhow, Result};
 use async_openai::types::{CompletionUsage, CreateChatCompletionResponse, Role};
 use log;
 use regex::Regex;

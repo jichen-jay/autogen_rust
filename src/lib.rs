@@ -5,7 +5,6 @@ pub mod immutable_agent;
 pub mod llama;
 pub mod use_tool;
 use crate::use_tool::{Tool, TypeConverter};
-use anyhow::Result;
 use ctor::ctor;
 use lazy_static::lazy_static;
 use once_cell::sync::Lazy;

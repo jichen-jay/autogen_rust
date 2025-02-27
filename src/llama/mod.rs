@@ -1,7 +1,6 @@
 pub mod llama_utils;
 
 use crate::LlmConfig;
-use anyhow::{anyhow, Result};
 use async_openai::types::{CompletionUsage, CreateChatCompletionResponse, Role};
 use llama_utils::*;
 use log;

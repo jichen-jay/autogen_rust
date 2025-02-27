@@ -8,7 +8,6 @@ use crate::{
     FormatterFn, LlmConfig, STORE, TEMPLATE_SYSTEM_PROMPT_PLANNER, TEMPLATE_SYSTEM_PROMPT_TOOL_USE,
     TEMPLATE_USER_PROMPT_TASK_JSON, TOGETHER_CONFIG,
 };
-use anyhow::Result;
 use async_openai::types::CompletionUsage;
 use async_openai::types::Role;
 use log::debug;
